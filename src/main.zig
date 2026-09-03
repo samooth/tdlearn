@@ -23,9 +23,12 @@ pub fn main(init: std.process.Init) !void {
     // Remaining args: path (first non-flag) and flags
     var path: []const u8 = ".";
     var save_flag = false;
+    var json_flag = false;
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--save")) {
             save_flag = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json_flag = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
             std.debug.print("Unknown flag: {s}\n", .{arg});
         } else if (std.mem.eql(u8, path, ".")) {
@@ -36,11 +39,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, command, "scan")) {
-        try runScan(init.io, path);
+        try runScan(init.io, path, json_flag);
     } else if (std.mem.eql(u8, command, "check")) {
-        try runCheck(init.io, path);
+        try runCheck(init.io, path, json_flag);
     } else if (std.mem.eql(u8, command, "gate")) {
-        try runGate(init.io, path, save_flag);
+        try runGate(init.io, path, save_flag, json_flag);
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
@@ -77,6 +80,62 @@ fn readFileOrNull(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[
         return null;
     };
     return buf[0..bytes_read];
+}
+
+// ── JSON output shapes (scores scaled ×10000) ────────────────────
+
+const JsonRootCauses = struct {
+    modularity: u32,
+    acyclicity: u32,
+    depth: u32,
+    equality: u32,
+    redundancy: u32,
+};
+
+const JsonScan = struct {
+    quality_signal: u32,
+    bottleneck: []const u8,
+    files: u32,
+    lines: u32,
+    import_edges: u32,
+    functions: u32,
+    dead_functions: u32,
+    duplicate_functions: u32,
+    root_causes: JsonRootCauses,
+};
+
+const JsonCheck = struct {
+    pass: bool,
+    rules_checked: u32,
+    quality_signal: u32,
+    violations: []const JsonViolation,
+};
+
+const JsonViolation = struct {
+    rule: []const u8,
+    severity: []const u8,
+    message: []const u8,
+};
+
+const JsonGate = struct {
+    pass: bool,
+    quality_signal: u32,
+    baseline_quality: u32,
+    violations: []const []const u8,
+};
+
+fn scoreInt(score: f64) u32 {
+    return @intFromFloat(@max(0.0, @min(1.0, score)) * 10000.0);
+}
+
+/// Write JSON payload to stdout (for tooling consumption).
+fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !void {
+    const json = try std.json.Stringify.valueAlloc(allocator, payload, .{ .whitespace = .indent_2 });
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    try stdout_writer.interface.writeAll(json);
+    try stdout_writer.interface.writeAll("\n");
+    try stdout_writer.interface.flush();
 }
 
 /// Full analysis result shared by scan/check/gate commands.
@@ -145,17 +204,39 @@ fn findFileNode(files: []const core.types.FileNode, path: []const u8) ?*const co
     return null;
 }
 
-fn runScan(io: std.Io, path: []const u8) !void {
+fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    std.debug.print("Scanning {s}...\n", .{path});
+    if (!json_flag) std.debug.print("Scanning {s}...\n", .{path});
 
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
 
     const result = try runAnalysis(arena.allocator(), io, path);
     const report = result.report;
+
+    if (json_flag) {
+        const payload = JsonScan{
+            .quality_signal = report.quality_signal_int,
+            .bottleneck = report.bottleneck,
+            .files = report.file_count,
+            .lines = report.line_count,
+            .import_edges = @intCast(result.import_edges.len),
+            .functions = report.total_functions,
+            .dead_functions = report.dead_functions,
+            .duplicate_functions = report.duplicate_functions,
+            .root_causes = .{
+                .modularity = scoreInt(report.root_cause_scores.modularity),
+                .acyclicity = scoreInt(report.root_cause_scores.acyclicity),
+                .depth = scoreInt(report.root_cause_scores.depth),
+                .equality = scoreInt(report.root_cause_scores.equality),
+                .redundancy = scoreInt(report.root_cause_scores.redundancy),
+            },
+        };
+        try printJsonStdout(io, arena.allocator(), payload);
+        return;
+    }
 
     std.debug.print("Found {d} files, {d} lines\n", .{ report.file_count, report.line_count });
     std.debug.print("\n", .{});
@@ -191,7 +272,7 @@ fn runScan(io: std.Io, path: []const u8) !void {
     });
 }
 
-fn runCheck(io: std.Io, path: []const u8) !void {
+fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
@@ -202,8 +283,18 @@ fn runCheck(io: std.Io, path: []const u8) !void {
     // Load rules from <path>/.tdlearn/rules.toml
     const rules_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/rules.toml", .{path});
     const rules_contents = readFileOrNull(aa, io, rules_path) orelse {
-        std.debug.print("No rules file at {s} — nothing to check.\n", .{rules_path});
-        std.debug.print("Create .tdlearn/rules.toml to define constraints.\n", .{});
+        if (json_flag) {
+            const payload = JsonCheck{
+                .pass = false,
+                .rules_checked = 0,
+                .quality_signal = 0,
+                .violations = &.{},
+            };
+            try printJsonStdout(io, aa, payload);
+        } else {
+            std.debug.print("No rules file at {s} — nothing to check.\n", .{rules_path});
+            std.debug.print("Create .tdlearn/rules.toml to define constraints.\n", .{});
+        }
         return error.NoRulesFile;
     };
 
@@ -234,6 +325,26 @@ fn runCheck(io: std.Io, path: []const u8) !void {
 
     const check = try core.rules.checkRules(aa, &config, &input);
 
+    if (json_flag) {
+        var json_violations = try aa.alloc(JsonViolation, check.violations.len);
+        for (check.violations, 0..) |v, i| {
+            json_violations[i] = .{
+                .rule = v.rule,
+                .severity = v.severity.label(),
+                .message = v.message,
+            };
+        }
+        const payload = JsonCheck{
+            .pass = check.pass(),
+            .rules_checked = check.rules_checked,
+            .quality_signal = report.quality_signal_int,
+            .violations = json_violations,
+        };
+        try printJsonStdout(io, aa, payload);
+        if (!check.pass()) return error.CheckFailed;
+        return;
+    }
+
     // Print results
     std.debug.print("tdlearn check — {d} rules checked\n", .{check.rules_checked});
     std.debug.print("Quality: {d}/10000\n", .{report.quality_signal_int});
@@ -254,7 +365,7 @@ fn runCheck(io: std.Io, path: []const u8) !void {
     return error.CheckFailed;
 }
 
-fn runGate(io: std.Io, path: []const u8, save_mode: bool) !void {
+fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
@@ -310,6 +421,18 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool) !void {
     };
 
     const violations = try saved.diff(current, aa);
+
+    if (json_flag) {
+        const payload = JsonGate{
+            .pass = violations.len == 0,
+            .quality_signal = result.report.quality_signal_int,
+            .baseline_quality = @intFromFloat(saved.quality_signal * 10000),
+            .violations = violations,
+        };
+        try printJsonStdout(io, aa, payload);
+        if (violations.len > 0) return error.GateFailed;
+        return;
+    }
 
     std.debug.print("tdlearn gate — structural regression check\n", .{});
     std.debug.print("Quality:  {d} -> {d} (per 10000)\n", .{
