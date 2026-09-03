@@ -20,16 +20,27 @@ pub fn main(init: std.process.Init) !void {
     }
     const command = command_opt.?;
 
-    // Get optional path argument (third arg)
-    const path_opt = args_iter.next();
-    const path: []const u8 = if (path_opt) |p| p else ".";
+    // Remaining args: path (first non-flag) and flags
+    var path: []const u8 = ".";
+    var save_flag = false;
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--save")) {
+            save_flag = true;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            std.debug.print("Unknown flag: {s}\n", .{arg});
+        } else if (std.mem.eql(u8, path, ".")) {
+            path = arg; // first positional = path
+        } else {
+            std.debug.print("Ignoring extra argument: {s}\n", .{arg});
+        }
+    }
 
     if (std.mem.eql(u8, command, "scan")) {
         try runScan(init.io, path);
     } else if (std.mem.eql(u8, command, "check")) {
         try runCheck(init.io, path);
     } else if (std.mem.eql(u8, command, "gate")) {
-        try runGate(init.io, path);
+        try runGate(init.io, path, save_flag);
     } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
     } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
@@ -243,9 +254,79 @@ fn runCheck(io: std.Io, path: []const u8) !void {
     return error.CheckFailed;
 }
 
-fn runGate(io: std.Io, path: []const u8) !void {
-    std.debug.print("Running quality gate on {s}...\n", .{path});
-    _ = io;
-    // TODO: Implement quality gate
-    std.debug.print("TODO: gate not yet implemented\n", .{});
+fn runGate(io: std.Io, path: []const u8, save_mode: bool) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const baseline_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/baseline.json", .{path});
+
+    if (save_mode) {
+        // Run analysis and save baseline
+        const result = try runAnalysis(aa, io, path);
+        const b = core.baseline.Baseline{
+            .quality_signal = result.report.quality_signal,
+            .cycle_count = result.report.root_cause_raw.cycle_count,
+            .max_depth = result.report.root_cause_raw.max_depth,
+            .total_functions = result.report.total_functions,
+            .dead_functions = result.report.dead_functions,
+            .duplicate_functions = result.report.duplicate_functions,
+        };
+        const json = try core.baseline.writeBaseline(aa, b);
+
+        // Ensure .tdlearn dir exists
+        const dir_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn", .{path});
+        std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+
+        const file = try std.Io.Dir.cwd().createFile(io, baseline_path, .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, json, 0);
+
+        std.debug.print("tdlearn gate — baseline saved\n", .{});
+        std.debug.print("Quality: {d}/10000\n", .{result.report.quality_signal_int});
+        std.debug.print("Baseline written to {s}\n", .{baseline_path});
+        return;
+    }
+
+    // Compare mode: load baseline, rescan, diff
+    const baseline_contents = readFileOrNull(aa, io, baseline_path) orelse {
+        std.debug.print("No baseline at {s}\n", .{baseline_path});
+        std.debug.print("Run 'tdlearn gate --save' first to create one.\n", .{});
+        return error.NoBaseline;
+    };
+    const saved = try core.baseline.readBaseline(aa, baseline_contents);
+
+    const result = try runAnalysis(aa, io, path);
+    const current = core.baseline.Baseline{
+        .quality_signal = result.report.quality_signal,
+        .cycle_count = result.report.root_cause_raw.cycle_count,
+        .max_depth = result.report.root_cause_raw.max_depth,
+        .total_functions = result.report.total_functions,
+        .dead_functions = result.report.dead_functions,
+        .duplicate_functions = result.report.duplicate_functions,
+    };
+
+    const violations = try saved.diff(current, aa);
+
+    std.debug.print("tdlearn gate — structural regression check\n", .{});
+    std.debug.print("Quality:  {d} -> {d} (per 10000)\n", .{
+        @as(u32, @intFromFloat(saved.quality_signal * 10000)),
+        result.report.quality_signal_int,
+    });
+    std.debug.print("Cycles:  {d} -> {d}\n", .{ saved.cycle_count, current.cycle_count });
+    std.debug.print("Depth:   {d} -> {d}\n", .{ saved.max_depth, current.max_depth });
+
+    if (violations.len == 0) {
+        std.debug.print("No degradation detected\n", .{});
+        return;
+    }
+
+    for (violations) |v| {
+        std.debug.print("x {s}\n", .{v});
+    }
+    std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
+    return error.GateFailed;
 }

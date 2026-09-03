@@ -5,3 +5,4 @@ pub const heat = @import("heat.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const toml = @import("toml.zig");
 pub const rules = @import("rules.zig");
+pub const baseline = @import("baseline.zig");
