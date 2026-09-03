@@ -78,11 +78,4 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_metrics_tests.step);
     test_step.dependOn(&run_analysis_tests.step);
-
-    // ── Install plugins directory ─────────────────────────────────
-    b.installDirectory(.{
-        .source_dir = b.path("plugins"),
-        .install_dir = .prefix,
-        .install_subdir = "plugins",
-    });
 }
