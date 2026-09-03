@@ -1,0 +1,34 @@
+# tdlearn rules for tdlearn itself
+# Layer order: HIGHER order = more foundational.
+# A layer may only import layers with >= its own order.
+
+[constraints]
+min_quality = 0.7
+min_modularity = 0.5
+max_file_lines = 400
+max_fn_lines = 80
+
+[[layers]]
+name = "core"
+paths = ["src/core/**"]
+order = 3
+
+[[layers]]
+name = "metrics"
+paths = ["src/metrics/**"]
+order = 2
+
+[[layers]]
+name = "analysis"
+paths = ["src/analysis/**"]
+order = 2
+
+[[layers]]
+name = "cli"
+paths = ["src/main.zig"]
+order = 0
+
+[[boundaries]]
+from = "src/metrics/**"
+to = "src/main.zig"
+reason = "metrics must not import the CLI"
