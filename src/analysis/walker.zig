@@ -13,17 +13,19 @@ const lang_registry = @import("lang_registry.zig");
 ///   // tree is a slice of FileNode with directory nesting
 pub const Walker = struct {
     arena: std.heap.ArenaAllocator,
-    allocator: Allocator,
     io: Io,
     root_path: []const u8,
     registry: lang_registry.LangRegistry,
 
+    /// Live allocator — must be computed on demand (arena is self-referential;
+    /// capturing `arena.allocator()` at init would dangle after struct copy).
+    pub fn allocator(self: *Walker) Allocator {
+        return self.arena.allocator();
+    }
+
     pub fn init(parent_allocator: Allocator, io: Io, root_path: []const u8) !Walker {
-        var arena = std.heap.ArenaAllocator.init(parent_allocator);
-        errdefer arena.deinit();
         return .{
-            .arena = arena,
-            .allocator = arena.allocator(),
+            .arena = std.heap.ArenaAllocator.init(parent_allocator),
             .io = io,
             .root_path = root_path,
             .registry = try lang_registry.LangRegistry.init(parent_allocator),
@@ -38,8 +40,26 @@ pub const Walker = struct {
     /// Walk the filesystem and build a flat list of FileNodes.
     pub fn walk(self: *Walker) ![]core.types.FileNode {
         var files: std.ArrayList(core.types.FileNode) = .empty;
-        try self.walkDir(self.root_path, &files);
-        return try files.toOwnedSlice(self.allocator);
+        // Normalize root: "." or "./" → "" so paths come out as "src/main.zig", not "./src/main.zig"
+        var root = self.root_path;
+        while (std.mem.startsWith(u8, root, "./")) root = root[2..];
+        if (std.mem.eql(u8, root, ".")) root = "";
+        try self.walkDir(if (root.len == 0) "." else root, &files);
+
+        // Fix up any "./"-prefixed child paths produced when root was "."
+        for (files.items) |*node| {
+            normalizeDotSlash(node);
+        }
+        return try files.toOwnedSlice(self.allocator());
+    }
+
+    fn normalizeDotSlash(node: *core.types.FileNode) void {
+        while (std.mem.startsWith(u8, node.path, "./")) node.path = node.path[2..];
+        if (node.children) |children| {
+            for (children) |*child| {
+                normalizeDotSlash(child);
+            }
+        }
     }
 
     fn walkDir(self: *Walker, dir_path: []const u8, files: *std.ArrayList(core.types.FileNode)) !void {
@@ -58,11 +78,11 @@ pub const Walker = struct {
                 continue;
             }
 
-            const full_path = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
-            defer self.allocator.free(full_path);
+            const full_path = try std.fs.path.join(self.allocator(), &.{ dir_path, entry.name });
+            defer self.allocator().free(full_path);
 
-            const path_copy = try self.allocator.dupe(u8, full_path);
-            const name_copy = try self.allocator.dupe(u8, entry.name);
+            const path_copy = try self.allocator().dupe(u8, full_path);
+            const name_copy = try self.allocator().dupe(u8, entry.name);
 
             if (entry.kind == .directory) {
                 // Recurse into subdirectory
@@ -70,10 +90,10 @@ pub const Walker = struct {
                 errdefer {
                     for (child_files.items) |*node| {
                         if (node.children) |children| {
-                            self.allocator.free(children);
+                            self.allocator().free(children);
                         }
                     }
-                    child_files.deinit(self.allocator);
+                    child_files.deinit(self.allocator());
                 }
 
                 self.walkDir(full_path, &child_files) catch |err| {
@@ -86,13 +106,13 @@ pub const Walker = struct {
                     break :blk @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
                 };
 
-                try files.append(self.allocator, .{
+                try files.append(self.allocator(), .{
                     .path = path_copy,
                     .name = name_copy,
                     .is_dir = true,
                     .mtime = mtime,
                     .lang = "",
-                    .children = try child_files.toOwnedSlice(self.allocator),
+                    .children = try child_files.toOwnedSlice(self.allocator()),
                 });
             } else if (entry.kind == .file) {
                 // Count lines
@@ -100,7 +120,7 @@ pub const Walker = struct {
 
                 const lang = self.registry.detectLang(name_copy);
 
-                try files.append(self.allocator, .{
+                try files.append(self.allocator(), .{
                     .path = path_copy,
                     .name = name_copy,
                     .is_dir = false,
@@ -134,8 +154,8 @@ pub const Walker = struct {
 
         // Read into a buffer
         const buf_size: usize = @intCast(@min(stat.size, 1024 * 1024));
-        const buf = try self.allocator.alloc(u8, buf_size);
-        defer self.allocator.free(buf);
+        const buf = try self.allocator().alloc(u8, buf_size);
+        defer self.allocator().free(buf);
 
         const bytes_read = file.readPositionalAll(self.io, buf, 0) catch return LineCounts{};
         const contents = buf[0..bytes_read];
@@ -210,21 +230,21 @@ pub const Walker = struct {
         return count;
     }
 
-    /// Flatten the tree into a list of all files (directories excluded).
-    pub fn flattenFiles(self: *Walker, files: []const core.types.FileNode) ![]const []const u8 {
+    /// Flatten the tree into a list of all source file paths (directories excluded).
+    pub fn flattenFiles(files: []const core.types.FileNode, alloc: Allocator) ![]const []const u8 {
         var result = std.ArrayList([]const u8).empty;
-        errdefer result.deinit(self.allocator);
-        try self.collectPaths(files, &result);
-        return try result.toOwnedSlice(self.allocator);
+        errdefer result.deinit(alloc);
+        try collectPathsStandalone(files, &result, alloc);
+        return try result.toOwnedSlice(alloc);
     }
 
-    fn collectPaths(self: *Walker, files: []const core.types.FileNode, result: *std.ArrayList([]const u8)) !void {
+    fn collectPathsStandalone(files: []const core.types.FileNode, result: *std.ArrayList([]const u8), alloc: Allocator) !void {
         for (files) |file| {
             if (!file.is_dir) {
-                try result.append(self.allocator, file.path);
+                try result.append(alloc, file.path);
             }
             if (file.children) |children| {
-                try self.collectPaths(children, result);
+                try collectPathsStandalone(children, result, alloc);
             }
         }
     }

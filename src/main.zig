@@ -73,11 +73,23 @@ fn runScan(io: std.Io, path: []const u8) !void {
 
     std.debug.print("Found {d} files, {d} lines\n", .{ file_count, total_lines });
 
-    // Compute health
+    // Build import graph: read sources, extract imports, resolve to file edges
+    var scan_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scan_arena.deinit();
+    const scan_alloc = scan_arena.allocator();
+
+    const file_paths = try analysis.walker.Walker.flattenFiles(files, scan_alloc);
+    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdges(
+        scan_alloc,
+        io,
+        file_paths,
+    );
+
+    // Compute health with real edges
     const report = try metrics.computeHealth(
-        allocator,
+        scan_alloc,
         files,
-        &.{},
+        import_edges,
         &.{},
     );
 
@@ -85,6 +97,7 @@ fn runScan(io: std.Io, path: []const u8) !void {
     std.debug.print("\n", .{});
     std.debug.print("Quality Signal: {d}/10000\n", .{report.quality_signal_int});
     std.debug.print("Bottleneck: {s}\n", .{report.bottleneck});
+    std.debug.print("Import edges: {d}\n", .{import_edges.len});
     std.debug.print("\n", .{});
     std.debug.print("Root Causes:\n", .{});
     std.debug.print("  Modularity:  {d:.3} (raw Q={d:.3})\n", .{
