@@ -48,6 +48,11 @@ pub const GraphBuilder = struct {
         return try edges.toOwnedSlice(allocator);
     }
 
+    /// Public wrapper: detect language for a file path (extension mapping).
+    pub fn detectLangForFile(path: []const u8) []const u8 {
+        return detectLangFor(path);
+    }
+
     fn detectLangFor(path: []const u8) []const u8 {
         // Uses the shared registry logic without allocating a registry instance:
         // extension + known-filename mapping mirrors lang_registry.

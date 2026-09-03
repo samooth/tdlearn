@@ -55,6 +55,19 @@ fn printUsage() void {
     , .{});
 }
 
+fn readFileOrNull(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    const stat = file.stat(io) catch return null;
+    if (stat.size == 0 or stat.size > 2 * 1024 * 1024) return null;
+    const buf = allocator.alloc(u8, @intCast(stat.size)) catch return null;
+    const bytes_read = file.readPositionalAll(io, buf, 0) catch {
+        allocator.free(buf);
+        return null;
+    };
+    return buf[0..bytes_read];
+}
+
 fn runScan(io: std.Io, path: []const u8) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -85,12 +98,27 @@ fn runScan(io: std.Io, path: []const u8) !void {
         file_paths,
     );
 
-    // Compute health with real edges
+    // Extract functions per file for dead-code analysis
+    var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
+    for (file_paths) |fpath| {
+        const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
+        if (std.mem.eql(u8, lang, "unknown")) continue;
+        const contents = (readFileOrNull(scan_alloc, io, fpath)) orelse continue;
+        const funcs = try analysis.functions.FunctionExtractor.extract(scan_alloc, contents, lang);
+        try file_funcs.append(scan_alloc, .{
+            .file = fpath,
+            .contents = contents,
+            .funcs = funcs,
+        });
+    }
+
+    // Compute health with real edges + function data
     const report = try metrics.computeHealth(
         scan_alloc,
         files,
         import_edges,
         &.{},
+        file_funcs.items,
     );
 
     // Print results
@@ -98,6 +126,11 @@ fn runScan(io: std.Io, path: []const u8) !void {
     std.debug.print("Quality Signal: {d}/10000\n", .{report.quality_signal_int});
     std.debug.print("Bottleneck: {s}\n", .{report.bottleneck});
     std.debug.print("Import edges: {d}\n", .{import_edges.len});
+    std.debug.print("Functions: {d} (dead: {d}, duplicated: {d})\n", .{
+        report.total_functions,
+        report.dead_functions,
+        report.duplicate_functions,
+    });
     std.debug.print("\n", .{});
     std.debug.print("Root Causes:\n", .{});
     std.debug.print("  Modularity:  {d:.3} (raw Q={d:.3})\n", .{

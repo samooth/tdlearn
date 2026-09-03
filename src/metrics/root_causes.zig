@@ -29,6 +29,10 @@ pub const HealthReport = struct {
     line_count: u32 = 0,
     edge_count: u32 = 0,
     bottleneck: []const u8 = "",
+    /// Dead-code analysis details (0 when file_funcs empty)
+    total_functions: u32 = 0,
+    dead_functions: u32 = 0,
+    duplicate_functions: u32 = 0,
 };
 
 /// Normalize raw metrics to [0, 1] scores and compute geometric mean.

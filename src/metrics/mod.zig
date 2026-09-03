@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const core = @import("core");
 
 pub const acyclicity = @import("acyclicity.zig");
+pub const dead_code = @import("dead_code.zig");
 pub const depth = @import("depth.zig");
 pub const equality = @import("equality.zig");
 pub const modularity = @import("modularity.zig");
@@ -17,11 +18,14 @@ pub const RootCauseScores = root_causes.RootCauseScores;
 ///
 /// This is the master function that orchestrates all 5 root cause metrics
 /// and produces a single quality signal [0, 10000].
+/// `file_funcs` provides extracted functions + file contents for dead-code
+/// analysis; pass `&.{}` to skip redundancy (reports ratio 0).
 pub fn computeHealth(
     allocator: Allocator,
     files: []const core.types.FileNode,
     import_edges: []const core.types.ImportEdge,
     call_edges: []const core.types.CallEdge,
+    file_funcs: []const dead_code.FileFuncs,
 ) !HealthReport {
     // Flatten file paths
     var file_paths = std.ArrayList([]const u8).empty;
@@ -111,8 +115,18 @@ pub fn computeHealth(
     // 4. Complexity Gini (equality)
     const gini = equality.computeComplexityGini(file_lines.items);
 
-    // 5. Redundancy (simplified: 0 for now, will add dead code detection later)
-    const redundancy_ratio: f64 = 0.0;
+    // 5. Redundancy: dead code + duplicates
+    var total_funcs: u32 = 0;
+    var dead_funcs: u32 = 0;
+    var dup_funcs: u32 = 0;
+    const redundancy_ratio: f64 = blk: {
+        if (file_funcs.len == 0) break :blk 0.0;
+        const dc = try dead_code.analyze(allocator, file_funcs);
+        total_funcs = dc.total_functions;
+        dead_funcs = dc.dead_functions;
+        dup_funcs = dc.duplicate_functions;
+        break :blk dc.redundancy_ratio;
+    };
 
     // Aggregate root causes
     const raw = RootCauseRaw{
@@ -135,6 +149,9 @@ pub fn computeHealth(
         .line_count = total_lines,
         .edge_count = @intCast(import_edges.len + call_edges.len),
         .bottleneck = bottleneck,
+        .total_functions = total_funcs,
+        .dead_functions = dead_funcs,
+        .duplicate_functions = dup_funcs,
     };
 }
 
@@ -169,6 +186,7 @@ test "compute_health empty project" {
         &files,
         &.{},
         &.{},
+        &.{},
     );
     try std.testing.expect(report.quality_signal > 0.0);
     try std.testing.expect(report.file_count == 0);
@@ -181,6 +199,7 @@ test "compute_health single file" {
     const report = try computeHealth(
         std.testing.allocator,
         &files,
+        &.{},
         &.{},
         &.{},
     );
@@ -201,6 +220,7 @@ test "compute_health with edges" {
         std.testing.allocator,
         &files,
         &edges,
+        &.{},
         &.{},
     );
     try std.testing.expect(report.quality_signal > 0.0);
