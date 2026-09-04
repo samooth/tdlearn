@@ -33,10 +33,10 @@ pub const FileFuncs = core.types.FileFuncs;
 
 /// Implicit entry point names that are never considered dead even if private.
 const implicit_entry_names = [_][]const u8{
-    "main",     "new",       "default", "init",    "setup",   "teardown",
-    "run",      "start",     "stop",    "build",  "configure", "register",
-    "update",   "draw",      "render",  "serialize", "deserialize", "deinit",
-    "drop",     "clone",     "fmt",     "from",    "into",
+    "main",   "new",   "default", "init",      "setup",       "teardown",
+    "run",    "start", "stop",    "build",     "configure",   "register",
+    "update", "draw",  "render",  "serialize", "deserialize", "deinit",
+    "drop",   "clone", "fmt",     "from",      "into",
 };
 
 /// Analyze dead code and duplication.

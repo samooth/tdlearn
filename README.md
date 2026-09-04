@@ -39,7 +39,7 @@ Found 31 files, 6300 lines
 
 Quality Signal: 7684/10000
 Bottleneck: equality
-Import edges: 40
+Import edges: 43, call edges: 24
 Functions: 147 (dead: 0, duplicated: 1)
 
 Root Causes:
@@ -111,7 +111,7 @@ All commands accept `--json` for machine-readable output on stdout:
 src/
 ├── core/           # types, path utils, settings, TOML parser, rules, baseline
 ├── analysis/       # walker, language registry, import extraction + resolution,
-│                   #   function extraction, graph builder
+│                   #   function extraction, call graph, graph builder
 ├── metrics/        # 5 root cause metrics, dead-code analysis, aggregation
 └── main.zig        # CLI: scan / check / gate
 ```

@@ -357,7 +357,7 @@ pub fn globMatch(pattern: []const u8, path: []const u8) bool {
         const prefix = pattern[0 .. pattern.len - 3];
         return std.mem.startsWith(u8, path, prefix) and
             (std.mem.eql(u8, path, prefix) or
-            (path.len > prefix.len and path[prefix.len] == '/'));
+                (path.len > prefix.len and path[prefix.len] == '/'));
     }
     if (std.mem.endsWith(u8, pattern, "/**/*")) {
         const prefix = pattern[0 .. pattern.len - 5];

@@ -272,18 +272,18 @@ fn scanLine(allocator: Allocator, sites: *std.ArrayList(CallSite), funcs: []cons
 fn isKeyword(name: []const u8) bool {
     const keywords = [_][]const u8{
         // Zig
-        "if",       "while",  "for",   "switch", "catch", "return", "fn",
+        "if",    "while", "for",    "switch", "catch",  "return", "fn",
         // Rust
-        "if",       "while",  "for",   "match",  "loop",  "unsafe", "as",
+        "if",    "while", "for",    "match",  "loop",   "unsafe", "as",
         // Python
-        "if",       "elif",   "while", "for",    "def",   "class",  "lambda",
+        "if",    "elif",  "while",  "for",    "def",    "class",  "lambda",
         "print",
         // JS
-        "if",       "while",  "for",   "switch", "catch", "function",
+        "if",    "while",  "for",    "switch", "catch",  "function",
         // Go
-        "if",       "for",    "switch", "go",    "defer", "func",   "return",
+        "if",    "for",   "switch", "go",     "defer",  "func",   "return",
         // C
-        "if",       "while",  "for",   "switch", "sizeof", "return",
+        "if",    "while", "for",    "switch", "sizeof", "return",
     };
     for (keywords) |k| {
         if (std.mem.eql(u8, name, k)) return true;
