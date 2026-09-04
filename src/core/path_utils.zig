@@ -82,6 +82,44 @@ pub fn depth(path: []const u8) u32 {
     return count;
 }
 
+/// Check if a file path is a conventional application entry point.
+///
+/// Matches by filename: main.*, index.*, app.*, __main__.py, mod.rs at
+/// a "cmd/..." path (Go command layout), and build.zig.
+/// Entry points are the BFS roots for the depth metric.
+pub fn isEntryPointPath(path: []const u8) bool {
+    const name = fileName(path);
+    const parent = parentDir(path);
+
+    // Go: cmd/<name>/main.go (also plain main.go anywhere)
+    // Rust: src/main.rs, src/bin/<name>.rs
+    if (std.mem.eql(u8, name, "main.go") or
+        std.mem.eql(u8, name, "main.rs") or
+        std.mem.eql(u8, name, "main.zig") or
+        std.mem.eql(u8, name, "main.py") or
+        std.mem.eql(u8, name, "main.c") or
+        std.mem.eql(u8, name, "main.cpp"))
+    {
+        return true;
+    }
+    if (std.mem.eql(u8, name, "index.js") or std.mem.eql(u8, name, "index.ts")) return true;
+    if (std.mem.eql(u8, name, "__main__.py")) return true;
+    if (std.mem.eql(u8, name, "build.zig")) return true;
+
+    // Rust: src/bin/<name>.rs — bin directory siblings of main.rs
+    if (parent) |p| {
+        if (std.mem.eql(u8, name, "app.py")) return true;
+        // Go cmd layout: cmd/foo/main.go already covered by main.go;
+        // Rust bin layout: src/bin/foo.rs
+        if (std.mem.endsWith(u8, p, "src/bin") and endsWithZigRs(name)) return true;
+    }
+    return false;
+}
+
+fn endsWithZigRs(name: []const u8) bool {
+    return std.mem.endsWith(u8, name, ".rs") or std.mem.endsWith(u8, name, ".zig");
+}
+
 // ── Internal helpers ──────────────────────────────────────────
 
 fn moduleOfDeep(path: []const u8, depth2_end: usize) []const u8 {
@@ -200,4 +238,24 @@ test "depth counting" {
     try std.testing.expectEqual(@as(u32, 1), depth("src/main.zig"));
     try std.testing.expectEqual(@as(u32, 2), depth("src/layout/types.zig"));
     try std.testing.expectEqual(@as(u32, 3), depth("a/b/c/d.zig"));
+}
+
+test "entry point detection" {
+    // Conventional entry files
+    try std.testing.expect(isEntryPointPath("src/main.zig"));
+    try std.testing.expect(isEntryPointPath("src/main.rs"));
+    try std.testing.expect(isEntryPointPath("main.go"));
+    try std.testing.expect(isEntryPointPath("cmd/foo/main.go"));
+    try std.testing.expect(isEntryPointPath("app/main.py"));
+    try std.testing.expect(isEntryPointPath("src/index.js"));
+    try std.testing.expect(isEntryPointPath("web/index.ts"));
+    try std.testing.expect(isEntryPointPath("pkg/__main__.py"));
+    try std.testing.expect(isEntryPointPath("build.zig"));
+    try std.testing.expect(isEntryPointPath("src/bin/tool.rs"));
+
+    // Non-entry files
+    try std.testing.expect(!isEntryPointPath("src/core/types.zig"));
+    try std.testing.expect(!isEntryPointPath("lib/utils.js"));
+    try std.testing.expect(!isEntryPointPath("src/lib.rs")); // package root, not entry
+    try std.testing.expect(!isEntryPointPath("tests/main_test.go"));
 }

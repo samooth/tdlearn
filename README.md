@@ -8,7 +8,9 @@ tdlearn computes five root cause metrics from your source code and produces a si
 
 - **Modularity** — Newman's Q on the import graph
 - **Acyclicity** — Tarjan's SCC cycle detection
-- **Depth** — BFS longest path from entry points
+- **Depth** — BFS longest path from entry points (conventional entry files:
+  `main.*`, `index.*`, `build.zig`, `__main__.py`, ...; falls back to
+  files with no incoming imports)
 - **Equality** — Gini coefficient on file complexity
 - **Redundancy** — dead code + duplicate function detection
 

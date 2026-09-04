@@ -76,30 +76,40 @@ pub fn computeHealth(
     );
 
     // 3. Depth from entry points
-    // Auto-detect: files with no incoming edges, or first file if no edges
-    var entry_points_buf: [16]usize = undefined;
+    // Prefer conventional entry files (main.*, index.*, build.zig, ...);
+    // fall back to files with no incoming import edges.
+    var entry_points_buf: [32]usize = undefined;
     var ep_count: usize = 0;
-    if (import_edges.len == 0) {
-        if (file_paths.items.len > 0) {
-            entry_points_buf[0] = 0;
-            ep_count = 1;
-        }
-    } else {
-        // Find nodes with no incoming edges
-        const incoming = try allocator.alloc(bool, file_paths.items.len);
-        defer allocator.free(incoming);
-        @memset(incoming, false);
-        for (import_edges) |edge| {
-            if (node_index.get(edge.to_file)) |to_id| {
-                incoming[to_id] = true;
+    {
+        // Pass 1: conventional entry-point paths
+        for (file_paths.items, 0..) |path, i| {
+            if (core.path_utils.isEntryPointPath(path)) {
+                if (ep_count < entry_points_buf.len) {
+                    entry_points_buf[ep_count] = i;
+                    ep_count += 1;
+                }
             }
         }
-        for (incoming, 0..) |has_incoming, i| {
-            if (!has_incoming and ep_count < entry_points_buf.len) {
-                entry_points_buf[ep_count] = i;
-                ep_count += 1;
+
+        // Pass 2 (fallback): no incoming edges
+        if (ep_count == 0 and import_edges.len > 0) {
+            const incoming = try allocator.alloc(bool, file_paths.items.len);
+            defer allocator.free(incoming);
+            @memset(incoming, false);
+            for (import_edges) |edge| {
+                if (node_index.get(edge.to_file)) |to_id| {
+                    incoming[to_id] = true;
+                }
+            }
+            for (incoming, 0..) |has_incoming, i| {
+                if (!has_incoming and ep_count < entry_points_buf.len) {
+                    entry_points_buf[ep_count] = i;
+                    ep_count += 1;
+                }
             }
         }
+
+        // Pass 3 (last resort): first file
         if (ep_count == 0 and file_paths.items.len > 0) {
             entry_points_buf[0] = 0;
             ep_count = 1;
@@ -230,4 +240,28 @@ test "compute_health with edges" {
     );
     try std.testing.expect(report.quality_signal > 0.0);
     try std.testing.expectEqual(@as(u32, 1), report.edge_count);
+}
+
+test "compute_health depth from conventional entry" {
+    // Entry (main.zig) listed LAST — conventional detection must find it
+    // regardless of ordering, giving depth 1 (main → util).
+    const files = [_]core.types.FileNode{
+        .{ .path = "src/util.zig", .name = "util.zig", .is_dir = false, .lines = 50 },
+        .{ .path = "src/lib.zig", .name = "lib.zig", .is_dir = false, .lines = 50 },
+        .{ .path = "src/main.zig", .name = "main.zig", .is_dir = false, .lines = 50 },
+    };
+    const edges = [_]core.types.ImportEdge{
+        .{ .from_file = "src/main.zig", .to_file = "src/lib.zig" },
+        .{ .from_file = "src/lib.zig", .to_file = "src/util.zig" },
+    };
+    const report = try computeHealth(
+        std.testing.allocator,
+        &files,
+        &edges,
+        &.{},
+        &.{},
+        &.{},
+    );
+    // main → lib → util = max depth 2 from the conventional entry
+    try std.testing.expectEqual(@as(u32, 2), report.root_cause_raw.max_depth);
 }
