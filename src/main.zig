@@ -98,6 +98,7 @@ const JsonScan = struct {
     files: u32,
     lines: u32,
     import_edges: u32,
+    call_edges: u32,
     functions: u32,
     dead_functions: u32,
     duplicate_functions: u32,
@@ -142,6 +143,7 @@ fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !
 const Analysis = struct {
     report: metrics.HealthReport,
     import_edges: []const core.types.ImportEdge,
+    call_edges: []const core.types.CallEdge,
     file_paths: []const []const u8,
     max_file_lines: u32,
     max_fn_lines: u32,
@@ -177,17 +179,25 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         }
     }
 
+    // Build call graph from extracted functions + import edges
+    const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdges(
+        arena,
+        file_funcs.items,
+        import_edges,
+    );
+
     const report = try metrics.computeHealth(
         arena,
         files,
         import_edges,
-        &.{},
+        call_edges,
         file_funcs.items,
     );
 
     return .{
         .report = report,
         .import_edges = import_edges,
+        .call_edges = call_edges,
         .file_paths = file_paths,
         .max_file_lines = max_file_lines,
         .max_fn_lines = max_fn_lines,
@@ -223,6 +233,7 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
             .files = report.file_count,
             .lines = report.line_count,
             .import_edges = @intCast(result.import_edges.len),
+            .call_edges = @intCast(result.call_edges.len),
             .functions = report.total_functions,
             .dead_functions = report.dead_functions,
             .duplicate_functions = report.duplicate_functions,
@@ -242,7 +253,7 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     std.debug.print("\n", .{});
     std.debug.print("Quality Signal: {d}/10000\n", .{report.quality_signal_int});
     std.debug.print("Bottleneck: {s}\n", .{report.bottleneck});
-    std.debug.print("Import edges: {d}\n", .{result.import_edges.len});
+    std.debug.print("Import edges: {d}, call edges: {d}\n", .{ result.import_edges.len, result.call_edges.len });
     std.debug.print("Functions: {d} (dead: {d}, duplicated: {d})\n", .{
         report.total_functions,
         report.dead_functions,

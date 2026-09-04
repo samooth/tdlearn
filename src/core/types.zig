@@ -157,6 +157,15 @@ pub const CallSite = struct {
     line: u32,
 };
 
+/// Functions extracted from one file, paired with the file path and its
+/// full contents — the shared input format for call-graph building and
+/// dead-code analysis.
+pub const FileFuncs = struct {
+    file: []const u8,
+    contents: []const u8,
+    funcs: []const FuncInfo,
+};
+
 // ═══════════════════════════════════════════════════════════════
 // Graph edge types — dependency relationships between files
 // ═══════════════════════════════════════════════════════════════

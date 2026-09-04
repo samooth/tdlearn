@@ -28,11 +28,8 @@ pub const DeadCodeResult = struct {
 };
 
 /// Collected function with its file for cross-referencing.
-pub const FileFuncs = struct {
-    file: []const u8,
-    contents: []const u8,
-    funcs: []const core.types.FuncInfo,
-};
+/// Canonical definition lives in core.types.FileFuncs.
+pub const FileFuncs = core.types.FileFuncs;
 
 /// Implicit entry point names that are never considered dead even if private.
 const implicit_entry_names = [_][]const u8{
@@ -42,7 +39,15 @@ const implicit_entry_names = [_][]const u8{
     "drop",     "clone",     "fmt",     "from",    "into",
 };
 
-pub fn analyze(allocator: Allocator, file_funcs: []const FileFuncs) !DeadCodeResult {
+/// Analyze dead code and duplication.
+/// `call_edges` (optional) provide precise cross-file liveness: a function
+/// is alive if it is the `to_func` of any edge, or its name appears as a
+/// call target in any file contents (fallback for same-file calls).
+pub fn analyze(
+    allocator: Allocator,
+    file_funcs: []const FileFuncs,
+    call_edges: []const core.types.CallEdge,
+) !DeadCodeResult {
     var result = DeadCodeResult{};
 
     var total: u32 = 0;
@@ -51,8 +56,15 @@ pub fn analyze(allocator: Allocator, file_funcs: []const FileFuncs) !DeadCodeRes
     var dead_files = std.ArrayList([]const u8).empty;
     errdefer dead_files.deinit(allocator);
 
-    // Build the global call-target set: every identifier followed by '('
-    // on a line that is NOT that function's own declaration line.
+    // Liveness from call edges: every to_func is called
+    var edge_called = std.StringHashMap(void).init(allocator);
+    defer edge_called.deinit();
+    for (call_edges) |e| {
+        _ = try edge_called.put(e.to_func, {});
+    }
+
+    // Fallback: identifiers followed by '(' anywhere (same-file calls,
+    // method-style dispatch, dynamic patterns)
     var call_targets = std.StringHashMap(void).init(allocator);
     defer call_targets.deinit();
     for (file_funcs) |ff| {
@@ -84,6 +96,7 @@ pub fn analyze(allocator: Allocator, file_funcs: []const FileFuncs) !DeadCodeRes
             if (func.is_method) continue;
             if (is_test_file) continue;
             if (isImplicitEntry(func.name)) continue;
+            if (edge_called.contains(func.name)) continue;
             if (call_targets.contains(func.name)) continue;
 
             dead += 1;
@@ -236,7 +249,7 @@ fn makeFunc(name: []const u8, start: u32, end: u32, is_public: bool) core.types.
 test "no functions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const result = try analyze(arena.allocator(), &.{});
+    const result = try analyze(arena.allocator(), &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.total_functions);
     try std.testing.expectEqual(@as(f64, 0.0), result.redundancy_ratio);
 }
@@ -253,7 +266,7 @@ test "all public functions are alive" {
     const ff = [_]FileFuncs{
         .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 2), result.total_functions);
     try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
     try std.testing.expectEqual(@as(f64, 0.0), result.redundancy_ratio);
@@ -279,7 +292,7 @@ test "uncalled private function is dead" {
     const ff = [_]FileFuncs{
         .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
     try std.testing.expectEqual(@as(f64, 1.0 / 3.0), result.dead_code_ratio);
     try std.testing.expectEqualStrings("src/lib.zig", result.dead_files[0]);
@@ -294,7 +307,7 @@ test "implicit entry names never dead" {
     const ff = [_]FileFuncs{
         .{ .file = "src/main.zig", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
 }
 
@@ -308,7 +321,7 @@ test "methods never dead" {
     const ff = [_]FileFuncs{
         .{ .file = "src/lib.rs", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
 }
 
@@ -321,7 +334,7 @@ test "test files excluded from dead analysis" {
     const ff = [_]FileFuncs{
         .{ .file = "src/lib_test.zig", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
 }
 
@@ -355,7 +368,7 @@ test "duplicate bodies detected" {
         .{ .file = "src/a.zig", .contents = contents_a, .funcs = funcs[0..1] },
         .{ .file = "src/b.zig", .contents = contents_b, .funcs = funcs[1..2] },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     // Both are dead AND duplicated: redundancy includes both signals
     try std.testing.expectEqual(@as(u32, 1), result.duplicate_functions);
 }
@@ -372,7 +385,28 @@ test "call target across files keeps function alive" {
         .{ .file = "src/lib.zig", .contents = lib_contents, .funcs = &lib_funcs },
         .{ .file = "src/app.zig", .contents = app_contents, .funcs = &app_funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
+}
+
+test "call edges mark liveness without textual call sites" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // helper is never textually called from main's body, but a call edge
+    // (from external analysis) declares it alive
+    const lib_contents = "fn helper() void {}";
+    const lib_funcs = [_]core.types.FuncInfo{makeFunc("helper", 1, 1, false)};
+    const app_contents = "pub fn main() void {\n    other_stuff();\n}";
+    const app_funcs = [_]core.types.FuncInfo{makeFunc("main", 1, 3, true)};
+    const ff = [_]FileFuncs{
+        .{ .file = "src/lib.zig", .contents = lib_contents, .funcs = &lib_funcs },
+        .{ .file = "src/app.zig", .contents = app_contents, .funcs = &app_funcs },
+    };
+    const edges = [_]core.types.CallEdge{
+        .{ .from_file = "src/app.zig", .from_func = "main", .to_file = "src/lib.zig", .to_func = "helper" },
+    };
+    const result = try analyze(arena.allocator(), &ff, &edges);
     try std.testing.expectEqual(@as(u32, 0), result.dead_functions);
 }
 
@@ -388,7 +422,7 @@ test "body too small skipped from duplicates" {
     const ff = [_]FileFuncs{
         .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
     };
-    const result = try analyze(arena.allocator(), &ff);
+    const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.duplicate_functions);
     // Both a and b are dead though (uncalled, private)
     try std.testing.expectEqual(@as(u32, 2), result.dead_functions);

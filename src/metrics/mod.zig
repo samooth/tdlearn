@@ -121,7 +121,7 @@ pub fn computeHealth(
     var dup_funcs: u32 = 0;
     const redundancy_ratio: f64 = blk: {
         if (file_funcs.len == 0) break :blk 0.0;
-        const dc = try dead_code.analyze(allocator, file_funcs);
+        const dc = try dead_code.analyze(allocator, file_funcs, call_edges);
         total_funcs = dc.total_functions;
         dead_funcs = dc.dead_functions;
         dup_funcs = dc.duplicate_functions;

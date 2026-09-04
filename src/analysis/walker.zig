@@ -187,18 +187,19 @@ pub const Walker = struct {
     }
 
     fn isCommentLine(line: []const u8) bool {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         // Single-line comments
-        if (std.mem.startsWith(u8, line, "//")) return true;
-        if (std.mem.startsWith(u8, line, "#")) return true;
-        if (std.mem.startsWith(u8, line, "--")) return true;
-        if (std.mem.startsWith(u8, line, ";")) return true;
-        if (std.mem.startsWith(u8, line, "%")) return true;
-        if (std.mem.startsWith(u8, line, "'''")) return true;
-        if (std.mem.startsWith(u8, line, "\"\"\"")) return true;
+        if (std.mem.startsWith(u8, trimmed, "//")) return true;
+        if (std.mem.startsWith(u8, trimmed, "#")) return true;
+        if (std.mem.startsWith(u8, trimmed, "--")) return true;
+        if (std.mem.startsWith(u8, trimmed, ";")) return true;
+        if (std.mem.startsWith(u8, trimmed, "%")) return true;
+        if (std.mem.startsWith(u8, trimmed, "'''")) return true;
+        if (std.mem.startsWith(u8, trimmed, "\"\"\"")) return true;
         // Block comment start (count as comment line)
-        if (std.mem.startsWith(u8, line, "/*")) return true;
-        if (std.mem.startsWith(u8, line, "<!--")) return true;
-        if (std.mem.startsWith(u8, line, "{-")) return true;
+        if (std.mem.startsWith(u8, trimmed, "/*")) return true;
+        if (std.mem.startsWith(u8, trimmed, "<!--")) return true;
+        if (std.mem.startsWith(u8, trimmed, "{-")) return true;
         return false;
     }
 

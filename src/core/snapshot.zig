@@ -39,6 +39,7 @@ pub const Snapshot = struct {
     /// Create a new snapshot from scanned files and graphs.
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         root_path: []const u8,
         files: []types.FileNode,
         import_edges: []types.ImportEdge,
@@ -75,7 +76,10 @@ pub const Snapshot = struct {
             .call_edge_count = @intCast(call_edges.len),
             .inherit_edge_count = @intCast(inherit_edges.len),
             .root_path = root_path,
-            .timestamp = std.time.timestamp(),
+            .timestamp = blk: {
+                const ts = std.Io.Clock.Timestamp.now(io, .real);
+                break :blk @intCast(@divTrunc(ts.raw.nanoseconds, std.time.ns_per_s));
+            },
             .allocator = allocator,
         };
     }
@@ -137,6 +141,7 @@ test "Snapshot init and file lookup" {
 
     var snap = try Snapshot.init(
         allocator,
+        std.testing.io,
         ".",
         files,
         &.{},
@@ -151,7 +156,8 @@ test "Snapshot init and file lookup" {
 
     const entry = snap.getFile("src/main.zig");
     try std.testing.expect(entry != null);
-    try std.testing.expectEqualStrings("main.zig", entry.?.lang);
+    try std.testing.expectEqualStrings("", entry.?.lang); // not detected without a walker
+    try std.testing.expectEqual(@as(u32, 0), entry.?.lines);
 }
 
 test "Snapshot with import edges" {
@@ -168,6 +174,7 @@ test "Snapshot with import edges" {
 
     var snap = try Snapshot.init(
         allocator,
+        std.testing.io,
         ".",
         files,
         edges,

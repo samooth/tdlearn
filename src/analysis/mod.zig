@@ -1,6 +1,14 @@
+const std = @import("std");
+
+pub const call_graph = @import("call_graph.zig");
 pub const functions = @import("functions.zig");
 pub const graph_builder = @import("graph_builder.zig");
 pub const imports = @import("imports.zig");
 pub const lang_registry = @import("lang_registry.zig");
 pub const resolver = @import("resolver.zig");
 pub const walker = @import("walker.zig");
+
+// Force test discovery in imported files (imports are lazy otherwise).
+test {
+    std.testing.refAllDecls(@This());
+}
