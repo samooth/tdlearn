@@ -12,7 +12,7 @@ tdlearn computes five root cause metrics from your source code and produces a si
 - **Equality** — Gini coefficient on file complexity
 - **Redundancy** — dead code + duplicate function detection
 
-Imports are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies.
+Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies. The import, call, and inheritance graphs all feed the modularity metric.
 
 ## Build
 
@@ -39,7 +39,7 @@ Found 31 files, 6300 lines
 
 Quality Signal: 7684/10000
 Bottleneck: equality
-Import edges: 43, call edges: 24
+Import edges: 48, call edges: 24, inherit edges: 0
 Functions: 147 (dead: 0, duplicated: 1)
 
 Root Causes:
@@ -100,7 +100,8 @@ All commands accept `--json` for machine-readable output on stdout:
   "bottleneck": "equality",
   "files": 31,
   "lines": 6300,
-  "import_edges": 40,
+  "import_edges": 48,
+  "call_edges": 24,
   "root_causes": { "modularity": 5870, "acyclicity": 10000, ... }
 }
 ```
@@ -111,7 +112,7 @@ All commands accept `--json` for machine-readable output on stdout:
 src/
 ├── core/           # types, path utils, settings, TOML parser, rules, baseline
 ├── analysis/       # walker, language registry, import extraction + resolution,
-│                   #   function extraction, call graph, graph builder
+│                   #   function/class extraction, call + inherit graphs
 ├── metrics/        # 5 root cause metrics, dead-code analysis, aggregation
 └── main.zig        # CLI: scan / check / gate
 ```

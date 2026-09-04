@@ -99,6 +99,7 @@ const JsonScan = struct {
     lines: u32,
     import_edges: u32,
     call_edges: u32,
+    inherit_edges: u32,
     functions: u32,
     dead_functions: u32,
     duplicate_functions: u32,
@@ -144,6 +145,7 @@ const Analysis = struct {
     report: metrics.HealthReport,
     import_edges: []const core.types.ImportEdge,
     call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
     file_paths: []const []const u8,
     max_file_lines: u32,
     max_fn_lines: u32,
@@ -162,6 +164,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     // Extract functions per file; track size extremes
     var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
+    var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
     var max_file_lines: u32 = 0;
     var max_fn_lines: u32 = 0;
     for (file_paths) |fpath| {
@@ -170,6 +173,11 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         const contents = (readFileOrNull(arena, io, fpath)) orelse continue;
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
         try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
+
+        const classes = try analysis.classes.ClassExtractor.extract(arena, contents, lang);
+        if (classes.len > 0) {
+            try file_classes.append(arena, .{ .file = fpath, .classes = classes });
+        }
 
         if (findFileNode(files, fpath)) |node| {
             if (node.lines > max_file_lines) max_file_lines = node.lines;
@@ -186,11 +194,19 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         import_edges,
     );
 
+    // Build inheritance graph from extracted classes + import edges
+    const inherit_edges = try analysis.inherit_graph.InheritGraphBuilder.buildInheritEdges(
+        arena,
+        file_classes.items,
+        import_edges,
+    );
+
     const report = try metrics.computeHealth(
         arena,
         files,
         import_edges,
         call_edges,
+        inherit_edges,
         file_funcs.items,
     );
 
@@ -198,6 +214,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         .report = report,
         .import_edges = import_edges,
         .call_edges = call_edges,
+        .inherit_edges = inherit_edges,
         .file_paths = file_paths,
         .max_file_lines = max_file_lines,
         .max_fn_lines = max_fn_lines,
@@ -234,6 +251,7 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
             .lines = report.line_count,
             .import_edges = @intCast(result.import_edges.len),
             .call_edges = @intCast(result.call_edges.len),
+            .inherit_edges = @intCast(result.inherit_edges.len),
             .functions = report.total_functions,
             .dead_functions = report.dead_functions,
             .duplicate_functions = report.duplicate_functions,
@@ -253,7 +271,11 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     std.debug.print("\n", .{});
     std.debug.print("Quality Signal: {d}/10000\n", .{report.quality_signal_int});
     std.debug.print("Bottleneck: {s}\n", .{report.bottleneck});
-    std.debug.print("Import edges: {d}, call edges: {d}\n", .{ result.import_edges.len, result.call_edges.len });
+    std.debug.print("Import edges: {d}, call edges: {d}, inherit edges: {d}\n", .{
+        result.import_edges.len,
+        result.call_edges.len,
+        result.inherit_edges.len,
+    });
     std.debug.print("Functions: {d} (dead: {d}, duplicated: {d})\n", .{
         report.total_functions,
         report.dead_functions,

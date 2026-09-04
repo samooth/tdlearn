@@ -25,6 +25,7 @@ pub fn computeHealth(
     files: []const core.types.FileNode,
     import_edges: []const core.types.ImportEdge,
     call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
     file_funcs: []const dead_code.FileFuncs,
 ) !HealthReport {
     // Flatten file paths
@@ -43,11 +44,12 @@ pub fn computeHealth(
         total_lines += l;
     }
 
-    // 1. Modularity Q
+    // 1. Modularity Q (all three edge types)
     const q = try modularity.computeModularityQ(
         allocator,
         import_edges,
         call_edges,
+        inherit_edges,
         file_paths.items,
     );
 
@@ -147,7 +149,7 @@ pub fn computeHealth(
         .root_cause_scores = scores,
         .file_count = @intCast(file_paths.items.len),
         .line_count = total_lines,
-        .edge_count = @intCast(import_edges.len + call_edges.len),
+        .edge_count = @intCast(import_edges.len + call_edges.len + inherit_edges.len),
         .bottleneck = bottleneck,
         .total_functions = total_funcs,
         .dead_functions = dead_funcs,
@@ -187,6 +189,7 @@ test "compute_health empty project" {
         &.{},
         &.{},
         &.{},
+        &.{},
     );
     try std.testing.expect(report.quality_signal > 0.0);
     try std.testing.expect(report.file_count == 0);
@@ -199,6 +202,7 @@ test "compute_health single file" {
     const report = try computeHealth(
         std.testing.allocator,
         &files,
+        &.{},
         &.{},
         &.{},
         &.{},
@@ -220,6 +224,7 @@ test "compute_health with edges" {
         std.testing.allocator,
         &files,
         &edges,
+        &.{},
         &.{},
         &.{},
     );

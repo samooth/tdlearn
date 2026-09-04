@@ -16,12 +16,13 @@ pub fn computeModularityQ(
     allocator: Allocator,
     import_edges: []const core.types.ImportEdge,
     call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
     file_paths: []const []const u8,
 ) !f64 {
     const n = file_paths.len;
     if (n == 0) return 1.0;
 
-    const m = import_edges.len + call_edges.len;
+    const m = import_edges.len + call_edges.len + inherit_edges.len;
     if (m == 0) return 1.0; // No edges = trivially modular
 
     // Build node index (path → id)
@@ -65,6 +66,18 @@ pub fn computeModularityQ(
         k_in.items[to_id] += 1;
 
         if (std.mem.eql(u8, core.path_utils.moduleOf(edge.from_file), core.path_utils.moduleOf(edge.to_file))) {
+            actual_intra += 1.0;
+        }
+    }
+
+    for (inherit_edges) |edge| {
+        const from_id = node_index.get(edge.child_file) orelse continue;
+        const to_id = node_index.get(edge.parent_file) orelse continue;
+
+        k_out.items[from_id] += 1;
+        k_in.items[to_id] += 1;
+
+        if (std.mem.eql(u8, core.path_utils.moduleOf(edge.child_file), core.path_utils.moduleOf(edge.parent_file))) {
             actual_intra += 1.0;
         }
     }
@@ -119,6 +132,7 @@ test "no edges" {
         std.testing.allocator,
         &.{},
         &.{},
+        &.{},
         &files,
     );
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), q, 0.001);
@@ -133,6 +147,7 @@ test "all edges within module" {
     const q = try computeModularityQ(
         std.testing.allocator,
         &edges,
+        &.{},
         &.{},
         &files,
     );
@@ -151,6 +166,7 @@ test "all edges between modules" {
         std.testing.allocator,
         &edges,
         &.{},
+        &.{},
         &files,
     );
     // All edges between different modules = low Q
@@ -161,6 +177,7 @@ test "empty files" {
     const files = [_][]const u8{};
     const q = try computeModularityQ(
         std.testing.allocator,
+        &.{},
         &.{},
         &.{},
         &files,
