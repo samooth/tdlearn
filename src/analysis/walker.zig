@@ -46,20 +46,38 @@ pub const Walker = struct {
         if (std.mem.eql(u8, root, ".")) root = "";
         try self.walkDir(if (root.len == 0) "." else root, &files);
 
-        // Fix up any "./"-prefixed child paths produced when root was "."
-        for (files.items) |*node| {
-            normalizeDotSlash(node);
-        }
+        normalizePaths(files.items, self.root_path);
         return try files.toOwnedSlice(self.allocator());
     }
 
-    fn normalizeDotSlash(node: *core.types.FileNode) void {
-        while (std.mem.startsWith(u8, node.path, "./")) node.path = node.path[2..];
-        if (node.children) |children| {
-            for (children) |*child| {
-                normalizeDotSlash(child);
-            }
+    fn normalizePaths(files: []core.types.FileNode, root: []const u8) void {
+        const normalized_root = normalizeRoot(root);
+        for (files) |*node| {
+            node.path = relativePath(node.path, normalized_root);
+            if (node.children) |children| normalizePaths(children, normalized_root);
         }
+    }
+
+    fn normalizeRoot(root: []const u8) []const u8 {
+        var result = root;
+        while (std.mem.startsWith(u8, result, "./")) result = result[2..];
+        if (std.mem.eql(u8, result, ".")) return "";
+        while (result.len > 1 and result[result.len - 1] == '/') result = result[0 .. result.len - 1];
+        return result;
+    }
+
+    fn relativePath(path: []const u8, root: []const u8) []const u8 {
+        var result = path;
+        while (std.mem.startsWith(u8, result, "./")) result = result[2..];
+        if (root.len == 0) return result;
+        if (std.mem.eql(u8, root, "/") and result.len > 1 and result[0] == '/') return result[1..];
+        if (result.len > root.len and
+            std.mem.startsWith(u8, result, root) and
+            result[root.len] == '/')
+        {
+            return result[root.len + 1 ..];
+        }
+        return result;
     }
 
     fn walkDir(self: *Walker, dir_path: []const u8, files: *std.ArrayList(core.types.FileNode)) !void {
@@ -245,6 +263,13 @@ pub const Walker = struct {
 };
 
 // ── Tests ─────────────────────────────────────────────────────
+
+test "normalizes paths relative to scan root" {
+    try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("/project/src/main.zig", "/project"));
+    try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("project/src/main.zig", "project"));
+    try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("./src/main.zig", ""));
+    try std.testing.expectEqualStrings("tmp/main.zig", Walker.relativePath("/tmp/main.zig", "/"));
+}
 
 test "isCommentLine" {
     try std.testing.expect(Walker.isCommentLine("// this is a comment"));
