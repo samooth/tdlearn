@@ -110,7 +110,8 @@ Prioridades:
 - [x] Resolver rutas relativas anidadas y `self::`/`super::`.
 - [x] Evitar que sufijos ambiguos se resuelvan al primer archivo según el orden del filesystem.
 - [x] Aumentar el buffer para paths largos y probar paths anidados.
-- [ ] Probar Unicode, separadores nativos y traversal.
+- [x] Probar Unicode y separadores nativos.
+- [ ] Probar traversal y normalización de rutas.
 - [x] Hacer el resultado independiente del orden de recorrido.
 
 ### [ ] ANALYSIS-005 — Completar funciones, clases y herencia

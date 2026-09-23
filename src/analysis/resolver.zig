@@ -117,18 +117,20 @@ pub const Resolver = struct {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const sa = scratch.allocator();
+        const normalized_from = normalizeSlashes(sa, from_file);
 
-        // 1. Relative path: ./foo or ../foo — resolve against from_file's dir
-        if (raw[0] == '.' and raw.len >= 2 and (raw[1] == '/' or raw[1] == '.')) {
-            const from_dir = core.path_utils.parentDir(from_file) orelse "";
-            if (self.resolveRelative(sa, raw, from_dir)) |path| return path;
-        }
+        if (self.resolveRustRelative(sa, raw, normalized_from)) |path| return path;
 
-        if (self.resolveRustRelative(sa, raw, from_file)) |path| return path;
-
-        // 2. Normalize :: separators (Rust) to '/'
         const normalized = normalizeSeparators(sa, raw);
         if (normalized.len == 0) return null;
+
+        // 1. Relative path: ./foo or ../foo — resolve against from_file's dir
+        if (normalized[0] == '.' and normalized.len >= 2 and
+            (normalized[1] == '/' or normalized[1] == '.'))
+        {
+            const from_dir = core.path_utils.parentDir(normalized_from) orelse "";
+            if (self.resolveRelative(sa, normalized, from_dir)) |path| return path;
+        }
 
         // 2.5 Package alias: first path segment names a known package
         // ("tdlearn_core/analysis" → "tdlearn-core/src/lib.rs" dir + analysis)
@@ -153,7 +155,7 @@ pub const Resolver = struct {
 
         // 5. Bare module reference: resolve relative to the importing file's dir.
         // Covers Zig sibling imports: @import("lang_registry.zig") from src/analysis/walker.zig
-        if (core.path_utils.parentDir(from_file)) |from_dir| {
+        if (core.path_utils.parentDir(normalized_from)) |from_dir| {
             if (from_dir.len > 0) {
                 const joined = std.mem.join(sa, "/", &.{ from_dir, normalized }) catch return null;
                 if (self.matchWithExtensions(sa, joined)) |path| return path;
@@ -165,6 +167,15 @@ pub const Resolver = struct {
         // 6. Unresolved single identifiers are stdlib/external — return null.
         // Multi-segment paths (npm/go modules) also stay unresolved here.
         return null;
+    }
+
+    fn normalizeSlashes(allocator: Allocator, raw: []const u8) []const u8 {
+        if (std.mem.indexOfScalar(u8, raw, '\\') == null) return raw;
+        const normalized = allocator.dupe(u8, raw) catch return raw;
+        for (normalized, 0..) |character, index| {
+            if (character == '\\') normalized[index] = '/';
+        }
+        return normalized;
     }
 
     fn expandAlias(self: *const Resolver, allocator: Allocator, path: []const u8) ?[]const u8 {
@@ -288,14 +299,15 @@ pub const Resolver = struct {
         if (std.mem.eql(u8, s, "super")) return "";
         if (std.mem.eql(u8, s, "crate")) return "";
 
-        if (std.mem.indexOfScalar(u8, s, ':') == null) {
-            return s; // fast path: no :: separators
+        if (std.mem.indexOfScalar(u8, s, ':') == null and
+            std.mem.indexOfScalar(u8, s, '\\') == null)
+        {
+            return s;
         }
 
-        // Replace :: with /
         const buf = allocator.dupe(u8, s) catch return s;
         for (buf, 0..) |c, i| {
-            if (c == ':') buf[i] = '/';
+            if (c == ':' or c == '\\') buf[i] = '/';
         }
         // collapse "//" produced by "a::b"
         var out: usize = 0;
@@ -403,6 +415,19 @@ test "relative resolution supports additional extensions" {
     try std.testing.expectEqualStrings(
         "include/widget.hpp",
         resolver.resolve("../include/widget", "src/main.ts").?,
+    );
+}
+
+test "native separators and unicode paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{ "src/main.ts", "lib/café/tool.mjs" };
+    var resolver = try Resolver.init(arena.allocator(), &paths);
+    defer resolver.deinit();
+
+    try std.testing.expectEqualStrings(
+        "lib/café/tool.mjs",
+        resolver.resolve("..\\lib\\café\\tool", "src\\main.ts").?,
     );
 }
 
