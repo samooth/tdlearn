@@ -35,6 +35,8 @@ pub const CallGraphBuilder = struct {
     ) ![]core.types.CallEdge {
         var edges = std.ArrayList(core.types.CallEdge).empty;
         errdefer edges.deinit(allocator);
+        var edge_set = EdgeSet.init(allocator);
+        defer edge_set.deinit();
 
         // Index 1: function name → list of (file, func) entries
         var fn_index = std.StringHashMap(*FnEntryList).init(allocator);
@@ -127,7 +129,7 @@ pub const CallGraphBuilder = struct {
                         }
                     }
                     if (public_matched orelse matched) |target| {
-                        try appendEdge(allocator, &edges, .{
+                        try appendEdge(allocator, &edges, &edge_set, .{
                             .from_file = ff.file,
                             .from_func = caller.name,
                             .to_file = target.file,
@@ -151,7 +153,7 @@ pub const CallGraphBuilder = struct {
                 }
                 if (public_count == 1) {
                     const target = public_target.?;
-                    try appendEdge(allocator, &edges, .{
+                    try appendEdge(allocator, &edges, &edge_set, .{
                         .from_file = ff.file,
                         .from_func = caller.name,
                         .to_file = target.file,
@@ -164,22 +166,41 @@ pub const CallGraphBuilder = struct {
         return try edges.toOwnedSlice(allocator);
     }
 
+    const EdgeSet = struct {
+        map: std.StringHashMap(void),
+        allocator: Allocator,
+
+        fn init(allocator: Allocator) EdgeSet {
+            return .{ .map = std.StringHashMap(void).init(allocator), .allocator = allocator };
+        }
+
+        fn deinit(self: *EdgeSet) void {
+            var iter = self.map.iterator();
+            while (iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
+            self.map.deinit();
+        }
+    };
+
     const FnEntryList = std.ArrayList(FnEntry);
     const FnEntry = struct {
         file: []const u8,
         func: core.types.FuncInfo,
     };
 
-    fn appendEdge(allocator: Allocator, edges: *std.ArrayList(core.types.CallEdge), edge: core.types.CallEdge) !void {
-        for (edges.items) |existing| {
-            if (std.mem.eql(u8, existing.from_file, edge.from_file) and
-                std.mem.eql(u8, existing.from_func, edge.from_func) and
-                std.mem.eql(u8, existing.to_file, edge.to_file) and
-                std.mem.eql(u8, existing.to_func, edge.to_func))
-            {
-                return; // dedupe
-            }
+    fn appendEdge(
+        allocator: Allocator,
+        edges: *std.ArrayList(core.types.CallEdge),
+        edge_set: *EdgeSet,
+        edge: core.types.CallEdge,
+    ) !void {
+        const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}\x00{s}\x00{s}", .{ edge.from_file, edge.from_func, edge.to_file, edge.to_func });
+        if (edge_set.map.contains(key)) {
+            allocator.free(key);
+            return;
         }
+        errdefer allocator.free(key);
+        try edge_set.map.put(key, {});
+        errdefer _ = edge_set.map.remove(key);
         try edges.append(allocator, edge);
     }
 

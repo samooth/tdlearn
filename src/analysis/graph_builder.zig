@@ -40,6 +40,12 @@ pub const GraphBuilder = struct {
     ) ![]core.types.ImportEdge {
         var edges = std.ArrayList(core.types.ImportEdge).empty;
         errdefer edges.deinit(allocator);
+        var edge_set = std.StringHashMap(void).init(allocator);
+        defer {
+            var iter = edge_set.iterator();
+            while (iter.next()) |entry| allocator.free(entry.key_ptr.*);
+            edge_set.deinit();
+        }
 
         const aliases = try manifests.readPackageAliasesAtRoot(allocator, io, root_path, file_paths);
         var source_paths = std.ArrayList([]const u8).empty;
@@ -68,9 +74,7 @@ pub const GraphBuilder = struct {
                         .from_file = path,
                         .to_file = target,
                     };
-                    if (!containsEdge(edges.items, edge)) {
-                        try edges.append(allocator, edge);
-                    }
+                    try appendEdge(allocator, &edges, &edge_set, edge);
                 }
             }
         }
@@ -134,15 +138,21 @@ pub const GraphBuilder = struct {
         return buf[0..bytes_read];
     }
 
-    fn containsEdge(edges: []const core.types.ImportEdge, target: core.types.ImportEdge) bool {
-        for (edges) |edge| {
-            if (std.mem.eql(u8, edge.from_file, target.from_file) and
-                std.mem.eql(u8, edge.to_file, target.to_file))
-            {
-                return true;
-            }
+    fn appendEdge(
+        allocator: Allocator,
+        edges: *std.ArrayList(core.types.ImportEdge),
+        edge_set: *std.StringHashMap(void),
+        edge: core.types.ImportEdge,
+    ) !void {
+        const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ edge.from_file, edge.to_file });
+        if (edge_set.contains(key)) {
+            allocator.free(key);
+            return;
         }
-        return false;
+        errdefer allocator.free(key);
+        try edge_set.put(key, {});
+        errdefer _ = edge_set.remove(key);
+        try edges.append(allocator, edge);
     }
 };
 

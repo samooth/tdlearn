@@ -18,6 +18,21 @@ pub const InheritGraphBuilder = struct {
         classes: []const core.types.ClassInfo,
     };
 
+    const EdgeSet = struct {
+        map: std.StringHashMap(void),
+        allocator: Allocator,
+
+        fn init(allocator: Allocator) EdgeSet {
+            return .{ .map = std.StringHashMap(void).init(allocator), .allocator = allocator };
+        }
+
+        fn deinit(self: *EdgeSet) void {
+            var iter = self.map.iterator();
+            while (iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
+            self.map.deinit();
+        }
+    };
+
     /// Build inheritance edges from per-file class lists.
     /// `import_edges` are the resolved file-level import edges.
     pub fn buildInheritEdges(
@@ -29,6 +44,8 @@ pub const InheritGraphBuilder = struct {
 
         var edges = std.ArrayList(core.types.InheritEdge).empty;
         errdefer edges.deinit(allocator);
+        var edge_set = EdgeSet.init(allocator);
+        defer edge_set.deinit();
 
         // class name → list of defining files
         var class_index = std.StringHashMap(*FileList).init(allocator);
@@ -102,7 +119,7 @@ pub const InheritGraphBuilder = struct {
                         if (imported) |imp| {
                             for (imp.items) |imp_file| {
                                 if (std.mem.eql(u8, imp_file, cand_file)) {
-                                    try appendEdge(allocator, &edges, .{
+                                    try appendEdge(allocator, &edges, &edge_set, .{
                                         .child_file = fc.file,
                                         .child_class = cls.name,
                                         .parent_file = cand_file,
@@ -119,7 +136,7 @@ pub const InheritGraphBuilder = struct {
                     if (candidates.items.len == 1) {
                         const cand_file = candidates.items[0];
                         if (std.mem.eql(u8, cand_file, fc.file)) continue;
-                        try appendEdge(allocator, &edges, .{
+                        try appendEdge(allocator, &edges, &edge_set, .{
                             .child_file = fc.file,
                             .child_class = cls.name,
                             .parent_file = cand_file,
@@ -133,16 +150,20 @@ pub const InheritGraphBuilder = struct {
         return try edges.toOwnedSlice(allocator);
     }
 
-    fn appendEdge(allocator: Allocator, edges: *std.ArrayList(core.types.InheritEdge), edge: core.types.InheritEdge) !void {
-        for (edges.items) |existing| {
-            if (std.mem.eql(u8, existing.child_file, edge.child_file) and
-                std.mem.eql(u8, existing.child_class, edge.child_class) and
-                std.mem.eql(u8, existing.parent_file, edge.parent_file) and
-                std.mem.eql(u8, existing.parent_class, edge.parent_class))
-            {
-                return;
-            }
+    fn appendEdge(
+        allocator: Allocator,
+        edges: *std.ArrayList(core.types.InheritEdge),
+        edge_set: *EdgeSet,
+        edge: core.types.InheritEdge,
+    ) !void {
+        const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}\x00{s}\x00{s}", .{ edge.child_file, edge.child_class, edge.parent_file, edge.parent_class });
+        if (edge_set.map.contains(key)) {
+            allocator.free(key);
+            return;
         }
+        errdefer allocator.free(key);
+        try edge_set.map.put(key, {});
+        errdefer _ = edge_set.map.remove(key);
         try edges.append(allocator, edge);
     }
 };
