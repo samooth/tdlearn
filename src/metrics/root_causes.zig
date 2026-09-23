@@ -29,7 +29,8 @@ pub const HealthReport = struct {
     line_count: u32 = 0,
     edge_count: u32 = 0,
     bottleneck: []const u8 = "",
-    /// Dead-code analysis details (0 when file_funcs empty)
+    /// Dead-code analysis details; zero functions produce a conservative
+    /// redundancy ratio of 1.0 because the data is unavailable.
     total_functions: u32 = 0,
     dead_functions: u32 = 0,
     duplicate_functions: u32 = 0,

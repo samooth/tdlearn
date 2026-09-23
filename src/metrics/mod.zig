@@ -19,7 +19,8 @@ pub const RootCauseScores = root_causes.RootCauseScores;
 /// This is the master function that orchestrates all 5 root cause metrics
 /// and produces a single quality signal [0, 10000].
 /// `file_funcs` provides extracted functions + file contents for dead-code
-/// analysis; pass `&.{}` to skip redundancy (reports ratio 0).
+/// analysis; pass `&.{}` when no function data is available (reports a
+/// conservative redundancy ratio of 1.0).
 pub fn computeHealth(
     allocator: Allocator,
     files: []const core.types.FileNode,
@@ -136,7 +137,6 @@ pub fn computeHealth(
     var dead_funcs: u32 = 0;
     var dup_funcs: u32 = 0;
     const redundancy_ratio: f64 = blk: {
-        if (file_funcs.len == 0) break :blk 0.0;
         const dc = try dead_code.analyze(allocator, file_funcs, call_edges);
         total_funcs = dc.total_functions;
         dead_funcs = dc.dead_functions;
@@ -331,4 +331,12 @@ test "compute_health uses function complexity for equality" {
     const uneven_report = try computeHealth(allocator, &files, &.{}, &.{}, &.{}, &uneven_file_funcs);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), equal_report.root_cause_raw.complexity_gini, 0.001);
     try std.testing.expect(uneven_report.root_cause_raw.complexity_gini > equal_report.root_cause_raw.complexity_gini);
+}
+
+test "compute_health does not reward missing function data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const report = try computeHealth(arena.allocator(), &.{}, &.{}, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(f64, 1.0), report.root_cause_raw.redundancy_ratio);
+    try std.testing.expectEqual(@as(f64, 0.0), report.root_cause_scores.redundancy);
 }

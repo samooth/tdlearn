@@ -4,21 +4,19 @@ const core = @import("core");
 
 /// Dead code and duplication detection.
 ///
-/// A function is dead when ALL of:
-///   - not public (no pub/export keyword)
-///   - not a method (object dispatch untraceable at line level)
-///   - not in a test file (path contains "test")
-///   - name doesn't match implicit-entry conventions (main, init, deinit, ...)
-///   - name never appears as a call target anywhere in the codebase
+/// A function is dead when it is not public, a method, a test, an implicit
+/// entry point, or reachable from a public/entry root through known calls.
 ///
 /// Duplicates: functions with identical normalized bodies (whitespace and
-/// comments stripped, SipHash). Bodies under 20 normalized chars are skipped.
+/// comments stripped, strings preserved). Hash groups are verified by exact
+/// normalized-body comparison. Bodies under 20 normalized chars are skipped.
 pub const DeadCodeResult = struct {
     /// dead_funcs / total_funcs, [0, 1]
     dead_code_ratio: f64 = 0.0,
     /// duplicated function instances / total_funcs, [0, 1]
     duplication_ratio: f64 = 0.0,
-    /// (dead + duplicates) / total, clamped to [0, 1]
+    /// Functions that are dead or duplicated / total, clamped to [0, 1].
+    /// With no extracted functions, use 1.0 as a conservative unknown.
     redundancy_ratio: f64 = 0.0,
     total_functions: u32 = 0,
     dead_functions: u32 = 0,
@@ -31,6 +29,27 @@ pub const DeadCodeResult = struct {
 /// Canonical definition lives in core.types.FileFuncs.
 pub const FileFuncs = core.types.FileFuncs;
 
+const FunctionRecord = struct {
+    file: []const u8,
+    func: core.types.FuncInfo,
+};
+
+const LocalCall = struct {
+    from: ?usize,
+    callee: []const u8,
+};
+
+const BodyRecord = struct {
+    id: usize,
+    body: []const u8,
+};
+
+const ScanState = struct {
+    block_comment: bool = false,
+    triple_quote: u8 = 0,
+    template: bool = false,
+};
+
 /// Implicit entry point names that are never considered dead even if private.
 const implicit_entry_names = [_][]const u8{
     "main",   "new",   "default", "init",      "setup",       "teardown",
@@ -39,157 +58,273 @@ const implicit_entry_names = [_][]const u8{
     "drop",   "clone", "fmt",     "from",      "into",
 };
 
-/// Analyze dead code and duplication.
-/// `call_edges` (optional) provide precise cross-file liveness: a function
-/// is alive if it is the `to_func` of any edge, or its name appears as a
-/// call target in any file contents (fallback for same-file calls).
+/// Analyze dead code and duplication. Liveness starts at public/API and
+/// conventional entry roots, then follows resolved and conservative textual
+/// calls. Test files are excluded from production dead-code decisions.
 pub fn analyze(
     allocator: Allocator,
     file_funcs: []const FileFuncs,
     call_edges: []const core.types.CallEdge,
 ) !DeadCodeResult {
-    var result = DeadCodeResult{};
+    var records = std.ArrayList(FunctionRecord).empty;
+    defer records.deinit(allocator);
 
-    var total: u32 = 0;
-    var dead: u32 = 0;
+    var local_calls = std.ArrayList(LocalCall).empty;
+    defer local_calls.deinit(allocator);
+
+    for (file_funcs) |ff| {
+        const record_start = records.items.len;
+        for (ff.funcs) |func| {
+            try records.append(allocator, .{
+                .file = ff.file,
+                .func = func,
+            });
+        }
+        if (!isTestPath(ff.file)) {
+            try collectLocalCalls(allocator, ff, record_start, &local_calls);
+        }
+    }
+
+    var reachable = try allocator.alloc(bool, records.items.len);
+    defer allocator.free(reachable);
+    @memset(reachable, false);
+
+    for (records.items, 0..) |record, id| {
+        if (isTestPath(record.file)) continue;
+        if (record.func.is_public or isRootFunction(record)) reachable[id] = true;
+    }
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (call_edges) |edge| {
+            if (isTestPath(edge.from_file) or isTestPath(edge.to_file)) continue;
+            if (markCallTargets(records.items, reachable, edge.from_file, edge.from_func, edge.to_file, edge.to_func)) {
+                changed = true;
+            }
+        }
+        for (local_calls.items) |call| {
+            if (markLocalTargets(records.items, reachable, call, call_edges)) changed = true;
+        }
+    }
+
+    var dead_flags = try allocator.alloc(bool, records.items.len);
+    defer allocator.free(dead_flags);
+    @memset(dead_flags, false);
 
     var dead_files = std.ArrayList([]const u8).empty;
     errdefer dead_files.deinit(allocator);
+    var dead_file_set = std.StringHashMap(void).init(allocator);
+    defer dead_file_set.deinit();
 
-    // Liveness from call edges: every to_func is called
-    var edge_called = std.StringHashMap(void).init(allocator);
-    defer edge_called.deinit();
-    for (call_edges) |e| {
-        _ = try edge_called.put(e.to_func, {});
+    var dead: u32 = 0;
+    for (records.items, 0..) |record, id| {
+        if (isTestPath(record.file)) continue;
+        if (record.func.is_public or record.func.is_method or isRootFunction(record)) continue;
+        if (reachable[id]) continue;
+        dead_flags[id] = true;
+        dead += 1;
+        if (!dead_file_set.contains(record.file)) {
+            try dead_file_set.put(record.file, {});
+            try dead_files.append(allocator, record.file);
+        }
     }
 
-    // Fallback: identifiers followed by '(' anywhere (same-file calls,
-    // method-style dispatch, dynamic patterns)
-    var call_targets = std.StringHashMap(void).init(allocator);
-    defer call_targets.deinit();
-    for (file_funcs) |ff| {
-        try collectCallTargets(&call_targets, ff);
+    var body_groups = std.AutoHashMap(u64, std.ArrayList(BodyRecord)).init(allocator);
+    defer {
+        var iter = body_groups.iterator();
+        while (iter.next()) |entry| {
+            for (entry.value_ptr.items) |body| allocator.free(body.body);
+            entry.value_ptr.deinit(allocator);
+        }
+        body_groups.deinit();
     }
 
-    // Duplicate detection: body hash → list of instances
-    var body_hashes = std.AutoHashMap(u64, u32).init(allocator);
-    defer body_hashes.deinit();
+    var duplicate_flags = try allocator.alloc(bool, records.items.len);
+    defer allocator.free(duplicate_flags);
+    @memset(duplicate_flags, false);
 
+    var record_start: usize = 0;
     for (file_funcs) |ff| {
-        const is_test_file = std.mem.indexOf(u8, ff.file, "test") != null;
+        for (ff.funcs, 0..) |func, func_index| {
+            const record = record_start + func_index;
+            if (isTestPath(ff.file) or hasOverlappingFunction(ff.funcs, func_index)) continue;
+            const body = try normalizeBody(allocator, ff.contents, func, ff.file) orelse continue;
+            const hash = std.hash.Wyhash.hash(0, body);
+            const gop = try body_groups.getOrPut(hash);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            errdefer allocator.free(body);
+            try gop.value_ptr.append(allocator, .{ .id = record, .body = body });
+        }
+        record_start += ff.funcs.len;
+    }
 
-        for (ff.funcs) |func| {
-            total += 1;
-
-            // Duplicate tracking
-            if (computeBodyHash(ff.contents, func)) |hash| {
-                const gop = try body_hashes.getOrPut(hash);
-                if (gop.found_existing) {
-                    gop.value_ptr.* += 1; // count extra instance
-                } else {
-                    gop.value_ptr.* = 1;
+    var duplicate_count: u32 = 0;
+    var groups = body_groups.iterator();
+    while (groups.next()) |entry| {
+        const group = entry.value_ptr.items;
+        for (group, 0..) |body, index| {
+            for (group[0..index]) |previous| {
+                if (std.mem.eql(u8, previous.body, body.body)) {
+                    duplicate_flags[body.id] = true;
+                    duplicate_count += 1;
+                    break;
                 }
             }
-
-            // Dead-code rules
-            if (func.is_public) continue;
-            if (func.is_method) continue;
-            if (is_test_file) continue;
-            if (isImplicitEntry(func.name)) continue;
-            if (edge_called.contains(func.name)) continue;
-            if (call_targets.contains(func.name)) continue;
-
-            dead += 1;
-            try dead_files.append(allocator, ff.file);
         }
     }
 
-    // Duplicate count: sum over groups with > 1 instance of (instances - 1)
-    var dup_count: u32 = 0;
-    var hash_iter = body_hashes.iterator();
-    while (hash_iter.next()) |entry| {
-        if (entry.value_ptr.* > 1) {
-            dup_count += entry.value_ptr.* - 1;
-        }
+    const total: u32 = @intCast(records.items.len);
+    var redundant: u32 = 0;
+    for (dead_flags, duplicate_flags) |is_dead, is_duplicate| {
+        if (is_dead or is_duplicate) redundant += 1;
     }
 
-    result.total_functions = total;
-    result.dead_functions = dead;
-    result.duplicate_functions = dup_count;
-
-    const total_f: f64 = @floatFromInt(total);
-    if (total > 0) {
-        result.dead_code_ratio = @as(f64, @floatFromInt(dead)) / total_f;
-        result.duplication_ratio = @as(f64, @floatFromInt(dup_count)) / total_f;
-        const waste = @as(f64, @floatFromInt(dead + dup_count));
-        result.redundancy_ratio = @min(1.0, waste / total_f);
+    var result = DeadCodeResult{
+        .total_functions = total,
+        .dead_functions = dead,
+        .duplicate_functions = duplicate_count,
+        .dead_files = try dead_files.toOwnedSlice(allocator),
+    };
+    if (total == 0) {
+        result.redundancy_ratio = 1.0;
+        return result;
     }
 
-    result.dead_files = try dead_files.toOwnedSlice(allocator);
+    const total_f = @as(f64, @floatFromInt(total));
+    result.dead_code_ratio = @as(f64, @floatFromInt(dead)) / total_f;
+    result.duplication_ratio = @as(f64, @floatFromInt(duplicate_count)) / total_f;
+    result.redundancy_ratio = @as(f64, @floatFromInt(redundant)) / total_f;
     return result;
 }
 
-/// Collect identifiers followed by '(' as call targets.
-/// Skips lines that are themselves function declarations (a definition's own
-/// name would otherwise count as a call site).
-fn collectCallTargets(targets: *std.StringHashMap(void), ff: FileFuncs) !void {
-    // Build a per-line lookup of "is declaration line" for this file's funcs
-    var decl_lines_buf: [64]u32 = undefined;
-    var decl_count: usize = 0;
-    for (ff.funcs) |f| {
-        if (decl_count < decl_lines_buf.len) {
-            decl_lines_buf[decl_count] = f.start_line;
-            decl_count += 1;
-        }
-    }
-    const decl_lines = decl_lines_buf[0..decl_count];
-
+fn collectLocalCalls(
+    allocator: Allocator,
+    ff: FileFuncs,
+    record_start: usize,
+    calls: *std.ArrayList(LocalCall),
+) !void {
+    var state = ScanState{};
+    const python = isPythonFile(ff.file);
     var line_no: u32 = 0;
-    var offset: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, ff.contents, offset, '\n')) |nl| {
+    var lines = std.mem.splitScalar(u8, ff.contents, '\n');
+    while (lines.next()) |line| {
         line_no += 1;
-        const line = ff.contents[offset..nl];
-        offset = nl + 1;
-
-        // Skip this file's own declaration lines
-        var is_decl = false;
-        for (decl_lines) |dl| {
-            if (dl == line_no) {
-                is_decl = true;
-                break;
-            }
-        }
-        if (is_decl) continue;
-
-        try collectLineCallTargets(targets, line);
-    }
-    // Last line without trailing newline
-    if (offset < ff.contents.len) {
-        line_no += 1;
-        var is_decl = false;
-        for (decl_lines) |dl| {
-            if (dl == line_no) {
-                is_decl = true;
-                break;
-            }
-        }
-        if (!is_decl) try collectLineCallTargets(targets, ff.contents[offset..]);
+        if (isDeclarationLine(ff.funcs, line_no)) continue;
+        const from = enclosingFunctionIndex(ff.funcs, line_no);
+        try scanLocalLine(allocator, line, python, &state, from, record_start, calls);
     }
 }
 
-fn collectLineCallTargets(targets: *std.StringHashMap(void), line: []const u8) !void {
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        if (line[i] == '(') {
-            var end = i;
-            while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) end -= 1;
-            var start = end;
-            while (start > 0 and isIdentChar(line[start - 1])) start -= 1;
-            if (start < end) {
-                _ = try targets.put(line[start..end], {});
+fn scanLocalLine(
+    allocator: Allocator,
+    line: []const u8,
+    python: bool,
+    state: *ScanState,
+    from: ?usize,
+    record_start: usize,
+    calls: *std.ArrayList(LocalCall),
+) !void {
+    var index: usize = 0;
+    while (index < line.len) : (index += 1) {
+        if (state.block_comment) {
+            if (index + 1 < line.len and line[index] == '*' and line[index + 1] == '/') {
+                state.block_comment = false;
+                index += 1;
             }
+            continue;
+        }
+        if (state.triple_quote != 0) {
+            if (index + 2 < line.len and line[index] == state.triple_quote and
+                line[index + 1] == state.triple_quote and line[index + 2] == state.triple_quote)
+            {
+                state.triple_quote = 0;
+                index += 2;
+            }
+            continue;
+        }
+        if (state.template) {
+            if (line[index] == '`') state.template = false;
+            continue;
+        }
+        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '/') break;
+        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '*') {
+            state.block_comment = true;
+            index += 1;
+            continue;
+        }
+        if (python and line[index] == '#') break;
+        if (index + 2 < line.len and
+            ((line[index] == '"' and line[index + 1] == '"' and line[index + 2] == '"') or
+                (line[index] == '\'' and line[index + 1] == '\'' and line[index + 2] == '\'')))
+        {
+            state.triple_quote = line[index];
+            index += 2;
+            continue;
+        }
+        if (line[index] == '"' or line[index] == '\'') {
+            const quote = line[index];
+            index += 1;
+            while (index < line.len) : (index += 1) {
+                if (line[index] == '\\' and index + 1 < line.len) {
+                    index += 1;
+                } else if (line[index] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (line[index] == '`') {
+            state.template = true;
+            continue;
+        }
+        if (line[index] != '(') continue;
+
+        var end = index;
+        while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) end -= 1;
+        var start = end;
+        while (start > 0 and isIdentChar(line[start - 1])) start -= 1;
+        if (start == end) continue;
+        const name = line[start..end];
+        if (isCallKeyword(name)) continue;
+        try calls.append(allocator, .{
+            .from = if (from) |func_index| record_start + func_index else null,
+            .callee = name,
+        });
+    }
+}
+
+fn isDeclarationLine(funcs: []const core.types.FuncInfo, line_no: u32) bool {
+    for (funcs) |func| {
+        if (func.start_line == line_no) return true;
+    }
+    return false;
+}
+
+fn enclosingFunctionIndex(funcs: []const core.types.FuncInfo, line_no: u32) ?usize {
+    var best: ?usize = null;
+    var best_size: u32 = std.math.maxInt(u32);
+    for (funcs, 0..) |func, index| {
+        if (line_no < func.start_line or line_no > func.end_line) continue;
+        const size = func.end_line - func.start_line;
+        if (best == null or size < best_size) {
+            best = index;
+            best_size = size;
         }
     }
+    return best;
+}
+
+fn isCallKeyword(name: []const u8) bool {
+    const keywords = [_][]const u8{
+        "if",     "while", "for",    "switch", "catch", "return", "fn",    "match",    "loop",
+        "unsafe", "as",    "elif",   "def",    "class", "lambda", "print", "function", "go",
+        "defer",  "func",  "sizeof",
+    };
+    for (keywords) |keyword| {
+        if (std.mem.eql(u8, name, keyword)) return true;
+    }
+    return false;
 }
 
 fn isIdentChar(c: u8) bool {
@@ -197,41 +332,242 @@ fn isIdentChar(c: u8) bool {
 }
 
 fn isImplicitEntry(name: []const u8) bool {
-    for (implicit_entry_names) |n| {
-        if (std.mem.eql(u8, name, n)) return true;
+    for (implicit_entry_names) |entry| {
+        if (std.mem.eql(u8, name, entry)) return true;
     }
     return false;
 }
 
-/// Normalize a function body: extract lines between start and end, strip
-/// comments and whitespace, then hash. Returns null if body too small.
-fn computeBodyHash(contents: []const u8, func: core.types.FuncInfo) ?u64 {
-    var buf: [4096]u8 = undefined;
-    var len: usize = 0;
+fn isRootFunction(record: FunctionRecord) bool {
+    if (isImplicitEntry(record.func.name)) return true;
+    if (!core.path_utils.isEntryPointPath(record.file)) return false;
+    const entry_names = [_][]const u8{ "main", "index", "app", "__main__", "build" };
+    for (entry_names) |name| {
+        if (std.mem.eql(u8, record.func.name, name)) return true;
+    }
+    return false;
+}
 
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    var line_no: u32 = 0;
-    while (lines.next()) |raw| {
-        line_no += 1;
-        if (line_no < func.start_line) continue;
-        if (line_no > func.end_line) break;
-        // Skip the declaration line itself — names differ between duplicates
-        if (line_no == func.start_line) continue;
-        var line = std.mem.trim(u8, raw, " \t\r");
-        // Strip line comments
-        if (std.mem.indexOf(u8, line, "//")) |ci| line = line[0..ci];
-        // Strip inline string contents? v1: keep — hashing consistency matters more
-        if (line.len == 0) continue;
-        for (line) |c| {
-            if (len >= buf.len) return null; // body too large to hash reliably
-            if (c == ' ' or c == '\t') continue; // strip all whitespace
-            buf[len] = c;
-            len += 1;
+fn isTestPath(path: []const u8) bool {
+    var components = std.mem.splitAny(u8, path, "/\\");
+    while (components.next()) |component| {
+        if (isTestComponent(component)) return true;
+    }
+    return false;
+}
+
+fn isTestComponent(component: []const u8) bool {
+    if (std.mem.eql(u8, component, "test") or std.mem.eql(u8, component, "tests") or
+        std.mem.eql(u8, component, "__tests__")) return true;
+    var parts = std.mem.splitScalar(u8, component, '.');
+    var first = true;
+    var stem: []const u8 = component;
+    while (parts.next()) |part| {
+        if (first) {
+            stem = part;
+            first = false;
+            continue;
+        }
+        if (std.mem.eql(u8, part, "test") or std.mem.eql(u8, part, "spec")) return true;
+    }
+    if (std.mem.eql(u8, stem, "test") or std.mem.eql(u8, stem, "tests") or
+        std.mem.eql(u8, stem, "__tests__") or std.mem.eql(u8, stem, "spec") or
+        std.mem.startsWith(u8, stem, "test_") or std.mem.startsWith(u8, stem, "test-")) return true;
+    if (std.mem.endsWith(u8, stem, "_test") or std.mem.endsWith(u8, stem, "_tests") or
+        std.mem.endsWith(u8, stem, "_spec")) return true;
+    return false;
+}
+
+fn isPythonFile(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".py");
+}
+
+fn markCallTargets(
+    records: []const FunctionRecord,
+    reachable: []bool,
+    from_file: []const u8,
+    from_func: []const u8,
+    to_file: []const u8,
+    to_func: []const u8,
+) bool {
+    var changed = false;
+    for (records, 0..) |source, source_id| {
+        if (!reachable[source_id]) continue;
+        if (!std.mem.eql(u8, source.file, from_file) or !std.mem.eql(u8, source.func.name, from_func)) continue;
+        for (records, 0..) |target, target_id| {
+            if (reachable[target_id]) continue;
+            if (!std.mem.eql(u8, target.func.name, to_func)) continue;
+            if (to_file.len > 0 and !std.mem.eql(u8, target.file, to_file)) continue;
+            reachable[target_id] = true;
+            changed = true;
         }
     }
+    return changed;
+}
 
-    if (len < 20) return null; // too small to be meaningfully duplicated
-    return std.hash.Wyhash.hash(0, buf[0..len]);
+fn markLocalTargets(
+    records: []const FunctionRecord,
+    reachable: []bool,
+    call: LocalCall,
+    call_edges: []const core.types.CallEdge,
+) bool {
+    var changed = false;
+    if (call.from) |from_id| {
+        if (from_id >= records.len or !reachable[from_id]) return false;
+    }
+    const source_file = if (call.from) |from_id| records[from_id].file else "";
+    const source_name = if (call.from) |from_id| records[from_id].func.name else "";
+    var has_local_target = false;
+    for (records) |target| {
+        if (call.from != null and std.mem.eql(u8, target.file, source_file) and
+            std.mem.eql(u8, target.func.name, call.callee))
+        {
+            has_local_target = true;
+            break;
+        }
+    }
+    var has_resolved_edge = false;
+    if (call.from != null) {
+        for (call_edges) |edge| {
+            if (std.mem.eql(u8, edge.from_file, source_file) and
+                std.mem.eql(u8, edge.from_func, source_name) and
+                std.mem.eql(u8, edge.to_func, call.callee))
+            {
+                has_resolved_edge = true;
+                break;
+            }
+        }
+    }
+    for (records, 0..) |target, target_id| {
+        if (reachable[target_id]) continue;
+        if (call.from != null and has_local_target and !std.mem.eql(u8, target.file, source_file)) continue;
+        if (call.from != null and !has_local_target and has_resolved_edge) continue;
+        if (!std.mem.eql(u8, target.func.name, call.callee)) continue;
+        reachable[target_id] = true;
+        changed = true;
+    }
+    return changed;
+}
+
+fn hasOverlappingFunction(funcs: []const core.types.FuncInfo, index: usize) bool {
+    const current = funcs[index];
+    for (funcs, 0..) |other, other_index| {
+        if (other_index == index) continue;
+        if (current.start_line <= other.end_line and other.start_line <= current.end_line) return true;
+    }
+    return false;
+}
+
+fn normalizeBody(allocator: Allocator, contents: []const u8, func: core.types.FuncInfo, file: []const u8) !?[]const u8 {
+    var normalized = std.ArrayList(u8).empty;
+    errdefer normalized.deinit(allocator);
+    var state = ScanState{};
+    const python = isPythonFile(file);
+    var line_no: u32 = 0;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |line| {
+        line_no += 1;
+        if (line_no <= func.start_line) continue;
+        if (line_no > func.end_line) break;
+        try normalizeLine(allocator, &normalized, line, python, &state);
+    }
+    if (normalized.items.len < 20) {
+        normalized.deinit(allocator);
+        return null;
+    }
+    return try normalized.toOwnedSlice(allocator);
+}
+
+fn normalizeLine(
+    allocator: Allocator,
+    output: *std.ArrayList(u8),
+    line: []const u8,
+    python: bool,
+    state: *ScanState,
+) !void {
+    var index: usize = 0;
+    while (index < line.len) : (index += 1) {
+        if (state.block_comment) {
+            if (index + 1 < line.len and line[index] == '*' and line[index + 1] == '/') {
+                state.block_comment = false;
+                index += 1;
+            }
+            continue;
+        }
+        if (state.triple_quote != 0) {
+            if (index + 2 < line.len and line[index] == state.triple_quote and
+                line[index + 1] == state.triple_quote and line[index + 2] == state.triple_quote)
+            {
+                state.triple_quote = 0;
+                index += 2;
+            } else {
+                try output.append(allocator, line[index]);
+            }
+            continue;
+        }
+        if (state.template) {
+            if (line[index] == '`') {
+                try output.append(allocator, '`');
+                state.template = false;
+            } else {
+                try output.append(allocator, line[index]);
+            }
+            continue;
+        }
+        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '/') {
+            appendSeparator(allocator, output) catch return error.OutOfMemory;
+            break;
+        }
+        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '*') {
+            appendSeparator(allocator, output) catch return error.OutOfMemory;
+            state.block_comment = true;
+            index += 1;
+            continue;
+        }
+        if (python and line[index] == '#') {
+            appendSeparator(allocator, output) catch return error.OutOfMemory;
+            break;
+        }
+        if (index + 2 < line.len and
+            ((line[index] == '"' and line[index + 1] == '"' and line[index + 2] == '"') or
+                (line[index] == '\'' and line[index + 1] == '\'' and line[index + 2] == '\'')))
+        {
+            try output.append(allocator, line[index]);
+            state.triple_quote = line[index];
+            index += 2;
+            continue;
+        }
+        if (line[index] == '"' or line[index] == '\'') {
+            const quote = line[index];
+            try output.append(allocator, quote);
+            index += 1;
+            while (index < line.len) : (index += 1) {
+                try output.append(allocator, line[index]);
+                if (line[index] == '\\' and index + 1 < line.len) {
+                    index += 1;
+                    try output.append(allocator, line[index]);
+                } else if (line[index] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (line[index] == '`') {
+            try output.append(allocator, '`');
+            state.template = true;
+            continue;
+        }
+        if (std.ascii.isWhitespace(line[index])) {
+            appendSeparator(allocator, output) catch return error.OutOfMemory;
+        } else {
+            try output.append(allocator, line[index]);
+        }
+    }
+}
+
+fn appendSeparator(allocator: Allocator, output: *std.ArrayList(u8)) !void {
+    if (output.items.len == 0 or output.items[output.items.len - 1] == ' ') return;
+    try output.append(allocator, ' ');
 }
 
 // ── Tests ─────────────────────────────────────────────────────
@@ -251,7 +587,7 @@ test "no functions" {
     defer arena.deinit();
     const result = try analyze(arena.allocator(), &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.total_functions);
-    try std.testing.expectEqual(@as(f64, 0.0), result.redundancy_ratio);
+    try std.testing.expectEqual(@as(f64, 1.0), result.redundancy_ratio);
 }
 
 test "all public functions are alive" {
@@ -361,9 +697,6 @@ test "duplicate bodies detected" {
         makeFunc("dup", 1, 4, false),
         makeFunc("dup2", 1, 4, false),
     };
-    // dup is called by someone in file a; dup2 not — only duplication counts
-    const contents_a_with_call = "pub fn user() void {\n    dup();\n}\ndup_body";
-    _ = contents_a_with_call;
     const ff = [_]FileFuncs{
         .{ .file = "src/a.zig", .contents = contents_a, .funcs = funcs[0..1] },
         .{ .file = "src/b.zig", .contents = contents_b, .funcs = funcs[1..2] },
@@ -424,6 +757,192 @@ test "body too small skipped from duplicates" {
     };
     const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 0), result.duplicate_functions);
-    // Both a and b are dead though (uncalled, private)
     try std.testing.expectEqual(@as(u32, 2), result.dead_functions);
+}
+
+test "test path matching does not use arbitrary substrings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const latest_funcs = [_]core.types.FuncInfo{makeFunc("helper", 1, 1, false)};
+    const test_funcs = [_]core.types.FuncInfo{makeFunc("test_helper", 1, 1, false)};
+    const ff = [_]FileFuncs{
+        .{ .file = "src/latest.zig", .contents = "fn helper() void {}", .funcs = &latest_funcs },
+        .{ .file = "src/test.zig", .contents = "fn test_helper() void {}", .funcs = &test_funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
+}
+
+test "liveness follows reachable callers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents =
+        \\pub fn api() void {}
+        \\fn orphan_caller() void {}
+        \\fn leaf() void {}
+    ;
+    const funcs = [_]core.types.FuncInfo{
+        makeFunc("api", 1, 1, true),
+        makeFunc("orphan_caller", 2, 2, false),
+        makeFunc("leaf", 3, 3, false),
+    };
+    const ff = [_]FileFuncs{
+        .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
+    };
+    const edges = [_]core.types.CallEdge{
+        .{ .from_file = "src/lib.zig", .from_func = "orphan_caller", .to_file = "src/lib.zig", .to_func = "leaf" },
+    };
+    const result = try analyze(arena.allocator(), &ff, &edges);
+    try std.testing.expectEqual(@as(u32, 2), result.dead_functions);
+}
+
+test "public API roots keep transitive local calls alive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents =
+        \\pub fn api() void {
+        \\    private_a();
+        \\}
+        \\fn private_a() void {
+        \\    private_b();
+        \\}
+        \\fn private_b() void {}
+        \\fn orphan() void {}
+    ;
+    const funcs = [_]core.types.FuncInfo{
+        makeFunc("api", 1, 3, true),
+        makeFunc("private_a", 4, 6, false),
+        makeFunc("private_b", 7, 7, false),
+        makeFunc("orphan", 8, 8, false),
+    };
+    const ff = [_]FileFuncs{
+        .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
+}
+
+test "resolved symbols keep only the selected target alive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const caller_contents = "pub fn api() void {\n    helper();\n}";
+    const target_contents = "fn helper() void {\n    const value = 1 + 2 + 3;\n    _ = value;\n}";
+    const other_contents = "fn helper() void {\n    const value = 4 + 5 + 6;\n    _ = value;\n}";
+    const caller_funcs = [_]core.types.FuncInfo{makeFunc("api", 1, 3, true)};
+    const target_funcs = [_]core.types.FuncInfo{makeFunc("helper", 1, 3, false)};
+    const other_funcs = [_]core.types.FuncInfo{makeFunc("helper", 1, 3, false)};
+    const ff = [_]FileFuncs{
+        .{ .file = "src/caller.zig", .contents = caller_contents, .funcs = &caller_funcs },
+        .{ .file = "src/target.zig", .contents = target_contents, .funcs = &target_funcs },
+        .{ .file = "src/other.zig", .contents = other_contents, .funcs = &other_funcs },
+    };
+    const edges = [_]core.types.CallEdge{
+        .{ .from_file = "src/caller.zig", .from_func = "api", .to_file = "src/target.zig", .to_func = "helper" },
+    };
+    const result = try analyze(arena.allocator(), &ff, &edges);
+    try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
+}
+
+test "declaration scanning is not capped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var contents = std.ArrayList(u8).empty;
+    var funcs = std.ArrayList(core.types.FuncInfo).empty;
+    for (0..65) |index| {
+        const line = try std.fmt.allocPrint(arena.allocator(), "fn helper{d}() void {{}}\n", .{index});
+        try contents.appendSlice(arena.allocator(), line);
+        try funcs.append(arena.allocator(), makeFunc("helper", @intCast(index + 1), @intCast(index + 1), false));
+    }
+    const ff = [_]FileFuncs{
+        .{ .file = "src/generated.zig", .contents = contents.items, .funcs = funcs.items },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 65), result.total_functions);
+    try std.testing.expectEqual(@as(u32, 65), result.dead_functions);
+}
+
+test "normalized bodies ignore comments but preserve string values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents_a =
+        \\fn first() void {
+        \\    // comment A
+        \\    const text = "same";
+        \\    const value = 1 + 2 + 3;
+        \\    _ = value;
+        \\}
+    ;
+    const contents_b =
+        \\fn second() void {
+        \\    /* comment B */
+        \\    const text = "same";
+        \\    const value = 1 + 2 + 3;
+        \\    _ = value;
+        \\}
+    ;
+    const contents_c =
+        \\fn third() void {
+        \\    // comment C
+        \\    const text = "different";
+        \\    const value = 1 + 2 + 3;
+        \\    _ = value;
+        \\}
+    ;
+    const funcs_a = [_]core.types.FuncInfo{makeFunc("first", 1, 5, false)};
+    const funcs_b = [_]core.types.FuncInfo{makeFunc("second", 1, 5, false)};
+    const funcs_c = [_]core.types.FuncInfo{makeFunc("third", 1, 5, false)};
+    const ff = [_]FileFuncs{
+        .{ .file = "src/a.zig", .contents = contents_a, .funcs = &funcs_a },
+        .{ .file = "src/b.zig", .contents = contents_b, .funcs = &funcs_b },
+        .{ .file = "src/c.zig", .contents = contents_c, .funcs = &funcs_c },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 1), result.duplicate_functions);
+}
+
+test "large normalized bodies are compared" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var first = std.ArrayList(u8).empty;
+    var second = std.ArrayList(u8).empty;
+    try first.appendSlice(arena.allocator(), "fn first() void {\n");
+    try second.appendSlice(arena.allocator(), "fn second() void {\n");
+    for (0..200) |index| {
+        const line = try std.fmt.allocPrint(arena.allocator(), "    const value{d} = 1 + 2;\n", .{index});
+        try first.appendSlice(arena.allocator(), line);
+        try second.appendSlice(arena.allocator(), line);
+    }
+    try first.appendSlice(arena.allocator(), "}\n");
+    try second.appendSlice(arena.allocator(), "}\n");
+    const first_funcs = [_]core.types.FuncInfo{makeFunc("first", 1, 202, false)};
+    const second_funcs = [_]core.types.FuncInfo{makeFunc("second", 1, 202, false)};
+    const ff = [_]FileFuncs{
+        .{ .file = "src/first.zig", .contents = first.items, .funcs = &first_funcs },
+        .{ .file = "src/second.zig", .contents = second.items, .funcs = &second_funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 1), result.duplicate_functions);
+}
+
+test "overlapping function bodies are excluded from duplicate matching" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents =
+        \\fn outer() void {
+        \\    fn inner() void {
+        \\        const value = 1 + 2 + 3;
+        \\        _ = value;
+        \\    }
+        \\    _ = inner;
+        \\}
+    ;
+    const funcs = [_]core.types.FuncInfo{
+        makeFunc("outer", 1, 6, false),
+        makeFunc("inner", 2, 4, false),
+    };
+    const ff = [_]FileFuncs{
+        .{ .file = "src/nested.zig", .contents = contents, .funcs = &funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 0), result.duplicate_functions);
 }

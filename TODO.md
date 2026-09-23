@@ -147,15 +147,15 @@ Prioridades:
 - [x] Poblar los campos de complejidad o eliminar los que no se puedan calcular.
 - [x] Añadir tests que demuestren que branches, y no solo líneas, afectan al resultado cuando aplique.
 
-### [ ] METRIC-003 — Corregir redundancia, dead code y duplicados
+### [x] METRIC-003 — Corregir redundancia, dead code y duplicados
 
-- Referencias: `src/metrics/dead_code.zig:59-234`, `src/metrics/mod.zig:130-141`.
-- [ ] Resolver llamadas por símbolo y alcanzar desde entry points/API pública.
-- [ ] No clasificar como test cualquier ruta que contenga la cadena `test`.
-- [ ] Eliminar el límite de declaraciones de 64 y validar exclusiones.
-- [ ] Comparar cuerpos normalizados con verificación secundaria para evitar colisiones de hash.
-- [ ] Manejar comentarios, strings, cuerpos grandes, funciones anidadas y solapamientos.
-- [ ] No premiar la ausencia de datos como si fuera cero redundancia; definir una política para proyectos sin funciones.
+- Referencias: `src/metrics/dead_code.zig:65-575`, `src/metrics/mod.zig:134-145`.
+- [x] Resolver llamadas por símbolo y alcanzar desde entry points/API pública.
+- [x] No clasificar como test cualquier ruta que contenga la cadena `test`.
+- [x] Eliminar el límite de declaraciones de 64 y validar exclusiones.
+- [x] Comparar cuerpos normalizados con verificación secundaria para evitar colisiones de hash.
+- [x] Manejar comentarios, strings, cuerpos grandes, funciones anidadas y solapamientos.
+- [x] No premiar la ausencia de datos como si fuera cero redundancia; definir una política para proyectos sin funciones.
 
 ### [ ] METRIC-004 — Validar ciclos y aristas de modularidad
 
