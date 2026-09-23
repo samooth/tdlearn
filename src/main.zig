@@ -150,7 +150,8 @@ fn readFileOrNull(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
     const stat = file.stat(io) catch return null;
-    if (stat.size == 0 or stat.size > 2 * 1024 * 1024) return null;
+    if (stat.size == 0) return "";
+    if (stat.size > 2 * 1024 * 1024) return null;
     const buf = allocator.alloc(u8, @intCast(stat.size)) catch return null;
     const bytes_read = file.readPositionalAll(io, buf, 0) catch {
         allocator.free(buf);
@@ -228,6 +229,17 @@ const Analysis = struct {
     max_fn_lines: u32,
 };
 
+fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8) ![]const []const u8 {
+    var source_paths = std.ArrayList([]const u8).empty;
+    errdefer source_paths.deinit(allocator);
+    for (all_paths) |file_path| {
+        if (!std.mem.eql(u8, analysis.graph_builder.GraphBuilder.detectLangForFile(file_path), "unknown")) {
+            try source_paths.append(allocator, file_path);
+        }
+    }
+    return try source_paths.toOwnedSlice(allocator);
+}
+
 /// Run walker + graph builder + function extraction + health metrics.
 /// All allocations come from `arena` (caller-owned).
 fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
@@ -237,8 +249,16 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     const files = try walker.walk();
 
-    const file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
-    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdges(arena, io, file_paths);
+    const all_file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
+    const file_paths = try filterSourcePaths(arena, all_file_paths);
+    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdges(arena, io, all_file_paths);
+
+    var source_files = std.ArrayList(core.types.FileNode).empty;
+    defer source_files.deinit(arena);
+    for (file_paths) |fpath| {
+        const node = findFileNode(files, fpath) orelse return error.FileNotFound;
+        try source_files.append(arena, node.*);
+    }
 
     // Extract functions per file; track size extremes
     var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
@@ -247,8 +267,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     var max_fn_lines: u32 = 0;
     for (file_paths) |fpath| {
         const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
-        if (std.mem.eql(u8, lang, "unknown")) continue;
-        const contents = (readFileOrNull(arena, io, fpath)) orelse continue;
+        const contents = readFileOrNull(arena, io, fpath) orelse return error.FileNotFound;
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
         try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
 
@@ -281,7 +300,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     const report = try metrics.computeHealth(
         arena,
-        files,
+        source_files.items,
         import_edges,
         call_edges,
         inherit_edges,
@@ -565,6 +584,23 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     }
     std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
     return error.GateFailed;
+}
+
+test "filter source paths excludes non-source files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const all_paths = [_][]const u8{
+        "src/main.zig",
+        "README.md",
+        "src/app.py",
+        "package.json",
+        "src/types.ts",
+    };
+    const source_paths = try filterSourcePaths(arena.allocator(), &all_paths);
+    try std.testing.expectEqual(@as(usize, 3), source_paths.len);
+    try std.testing.expectEqualStrings("src/main.zig", source_paths[0]);
+    try std.testing.expectEqualStrings("src/app.py", source_paths[1]);
+    try std.testing.expectEqualStrings("src/types.ts", source_paths[2]);
 }
 
 test "parse options accepts flags and path" {

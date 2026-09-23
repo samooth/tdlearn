@@ -78,10 +78,10 @@ Prioridades:
 ### [ ] ANALYSIS-001 — Separar archivos fuente de archivos recorrido
 
 - Referencias: `src/analysis/walker.zig:117-186`, `src/analysis/lang_registry.zig`, `src/main.zig:162-177`.
-- [ ] Definir el conjunto exacto de archivos que participa en cada métrica.
-- [ ] No contar README, JSON, binarios o extensiones desconocidas como nodos estructurales por accidente.
-- [ ] Definir el tratamiento de archivos vacíos, binarios, symlinks y archivos grandes.
-- [ ] Hacer que graphs, `file_count`, líneas y Gini usen el mismo universo de datos.
+- [x] Definir el conjunto exacto de archivos que participa en cada métrica.
+- [x] No contar README, JSON, binarios o extensiones desconocidas como nodos estructurales por accidente.
+- [x] Definir el tratamiento de archivos vacíos, binarios, symlinks y archivos grandes.
+- [x] Hacer que graphs, `file_count`, líneas y Gini usen el mismo universo de datos.
 - [ ] Añadir fixtures end-to-end con archivos no fuente.
 
 ### [ ] ANALYSIS-002 — Corregir la extracción de funciones Python

@@ -23,13 +23,19 @@ pub const GraphBuilder = struct {
         errdefer edges.deinit(allocator);
 
         const aliases = try manifests.readPackageAliases(allocator, io, file_paths);
-        var resolver = try resolver_mod.Resolver.initWithAliases(allocator, file_paths, aliases);
+        var source_paths = std.ArrayList([]const u8).empty;
+        defer source_paths.deinit(allocator);
+        for (file_paths) |path| {
+            if (!std.mem.eql(u8, detectLangFor(path), "unknown")) {
+                try source_paths.append(allocator, path);
+            }
+        }
+
+        var resolver = try resolver_mod.Resolver.initWithAliases(allocator, source_paths.items, aliases);
         defer resolver.deinit();
 
-        for (file_paths) |path| {
+        for (source_paths.items) |path| {
             const lang = detectLangFor(path);
-            if (std.mem.eql(u8, lang, "unknown")) continue;
-
             const contents = try readFile(allocator, io, path);
             const raw_imports = try imports_mod.ImportExtractor.extract(allocator, contents, lang);
 
