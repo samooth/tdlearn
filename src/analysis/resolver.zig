@@ -111,6 +111,8 @@ pub const Resolver = struct {
             if (self.resolveRelative(sa, raw, from_dir)) |path| return path;
         }
 
+        if (self.resolveRustRelative(sa, raw, from_file)) |path| return path;
+
         // 2. Normalize :: separators (Rust) to '/'
         const normalized = normalizeSeparators(sa, raw);
         if (normalized.len == 0) return null;
@@ -182,6 +184,33 @@ pub const Resolver = struct {
         }
     }
 
+    fn resolveRustRelative(self: *const Resolver, sa: Allocator, raw: []const u8, from_file: []const u8) ?[]const u8 {
+        const from_dir = core.path_utils.parentDir(from_file) orelse return null;
+        if (std.mem.startsWith(u8, raw, "self::")) {
+            const rest = raw["self::".len..];
+            if (rest.len == 0) return null;
+            return self.resolveRelative(sa, rest, from_dir);
+        }
+        if (std.mem.startsWith(u8, raw, "self/")) {
+            const rest = raw["self/".len..];
+            if (rest.len == 0) return null;
+            return self.resolveRelative(sa, rest, from_dir);
+        }
+        if (std.mem.startsWith(u8, raw, "super::")) {
+            const rest = raw["super::".len..];
+            if (rest.len == 0) return null;
+            const relative = std.mem.join(sa, "/", &.{ "..", rest }) catch return null;
+            return self.resolveRelative(sa, relative, from_dir);
+        }
+        if (std.mem.startsWith(u8, raw, "super/")) {
+            const rest = raw["super/".len..];
+            if (rest.len == 0) return null;
+            const relative = std.mem.join(sa, "/", &.{ "..", rest }) catch return null;
+            return self.resolveRelative(sa, relative, from_dir);
+        }
+        return null;
+    }
+
     fn resolveRelative(self: *const Resolver, sa: Allocator, raw: []const u8, from_dir: []const u8) ?[]const u8 {
         // raw starts with "./" or "../"
         var parts = std.ArrayList([]const u8).empty;
@@ -207,6 +236,7 @@ pub const Resolver = struct {
         const joined = std.mem.join(sa, "/", parts.items) catch return null;
 
         if (self.matchWithExtensions(joined)) |path| return path;
+        if (self.matchSuffixChain(joined)) |path| return path;
         if (self.suffix_index.get(joined)) |idx| return self.file_paths[idx];
         // Relative import might reference a package dir: "./core" → "core/mod.zig"
         if (self.suffix_index.get(stripExt(joined))) |idx| return self.file_paths[idx];
@@ -219,7 +249,10 @@ pub const Resolver = struct {
         // Exact (already has extension)
         if (self.path_index.get(path)) |idx| return self.file_paths[idx];
 
-        const extensions = [_][]const u8{ ".zig", ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".c", ".h", ".cpp" };
+        const extensions = [_][]const u8{
+            ".zig", ".rs", ".py", ".pyi", ".js",  ".jsx", ".mjs", ".ts",  ".tsx", ".mts",
+            ".go",  ".c",  ".h",  ".cpp", ".hpp", ".cc",  ".cxx", ".hxx", ".m",   ".mm",
+        };
         var buf: [512]u8 = undefined;
         for (extensions) |ext| {
             if (path.len + ext.len > buf.len) continue;
@@ -235,7 +268,8 @@ pub const Resolver = struct {
         var s = raw;
         if (std.mem.startsWith(u8, s, "crate::")) s = s["crate::".len..];
         if (std.mem.startsWith(u8, s, "crate/")) s = s["crate/".len..];
-        if (std.mem.startsWith(u8, s, "self::")) return ""; // self-module, skip
+        if (std.mem.eql(u8, s, "self")) return "";
+        if (std.mem.eql(u8, s, "super")) return "";
         if (std.mem.eql(u8, s, "crate")) return "";
 
         if (std.mem.indexOfScalar(u8, s, ':') == null) {
@@ -303,6 +337,44 @@ test "relative resolution" {
     try std.testing.expectEqualStrings(
         "src/core/types.zig",
         resolver.resolve("../core/types", "src/main.zig").?,
+    );
+}
+
+test "relative resolution supports additional extensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{ "src/main.ts", "lib/tool.mjs", "include/widget.hpp" };
+    var resolver = try Resolver.init(arena.allocator(), &paths);
+    defer resolver.deinit();
+
+    try std.testing.expectEqualStrings(
+        "lib/tool.mjs",
+        resolver.resolve("../lib/tool", "src/main.ts").?,
+    );
+    try std.testing.expectEqualStrings(
+        "include/widget.hpp",
+        resolver.resolve("../include/widget", "src/main.ts").?,
+    );
+}
+
+test "rust self and super prefixes resolve relatively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{
+        "src/parser/mod.rs",
+        "src/parser/helper.rs",
+        "src/helper.rs",
+    };
+    var resolver = try Resolver.init(arena.allocator(), &paths);
+    defer resolver.deinit();
+
+    try std.testing.expectEqualStrings(
+        "src/parser/helper.rs",
+        resolver.resolve("self::helper", "src/parser/mod.rs").?,
+    );
+    try std.testing.expectEqualStrings(
+        "src/helper.rs",
+        resolver.resolve("super::helper", "src/parser/mod.rs").?,
     );
 }
 
