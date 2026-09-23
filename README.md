@@ -20,7 +20,7 @@ tdlearn computes five root cause metrics from your source code and produces a si
 
 All graph and rule paths are canonical root-relative `/` paths; native filesystem roots are kept separate during walking, and symlinks/junctions are not followed.
 
-Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies.
+Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies. The parser is intentionally conservative: unsupported macros, dynamic dispatch, and syntax that cannot be identified line-by-line may be omitted rather than guessed.
 
 ## Build
 
@@ -117,7 +117,13 @@ All commands accept `--json` for machine-readable output on stdout:
   "lines": 6300,
   "import_edges": 48,
   "call_edges": 24,
-  "root_causes": { "modularity": 5870, "acyclicity": 10000, ... }
+  "root_causes": {
+    "modularity": 5870,
+    "acyclicity": 10000,
+    "depth": 8000,
+    "equality": 5750,
+    "redundancy": 9930
+  }
 }
 ```
 

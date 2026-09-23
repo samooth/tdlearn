@@ -264,10 +264,11 @@ Prioridades:
 
 - Referencias: `README.md:19-129`, `build.zig.zon:7-13`.
 - [ ] Documentar instalación, `zig build run --`, rutas soportadas, límites y limitaciones del parser.
-- [ ] Corregir el ejemplo JSON para que sea JSON válido.
+- [x] Corregir el ejemplo JSON para que sea JSON válido.
 - [ ] Añadir el archivo `LICENSE` declarado por el README.
-- [ ] Derivar la versión de una única fuente y corregir `paths` que referencian directorios inexistentes.
-- [ ] Documentar esquema de TOML, JSON y baseline, compatibilidad y política de migraciones.
+- [ ] Derivar la versión de una única fuente.
+- [x] Corregir `paths` que referencian directorios inexistentes.
+- [x] Documentar esquema de TOML, JSON y baseline, compatibilidad y política de migraciones.
 
 ### [ ] QA-001 — Cerrar los controles del propio proyecto
 
