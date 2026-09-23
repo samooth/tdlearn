@@ -570,37 +570,32 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     });
 }
 
-fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
+const CheckExecution = struct {
+    report: metrics.HealthReport,
+    check: core.rules.CheckResult,
+};
 
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const aa = arena.allocator();
+const GateSaveExecution = struct {
+    report: metrics.HealthReport,
+};
+
+const GateCompareExecution = struct {
+    baseline: core.baseline.Baseline,
+    current: core.baseline.Baseline,
+    report: metrics.HealthReport,
+    violations: []const []const u8,
+};
+
+fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckExecution {
     try validateRoot(io, path);
-
-    // Load rules from <path>/.tdlearn/rules.toml
-    const rules_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/rules.toml", .{path});
-    const rules_contents = readFileOrNull(aa, io, rules_path) orelse {
-        if (json_flag) {
-            try printJsonError(io, aa, error.NoRulesFile);
-        } else {
-            std.debug.print("No rules file at {s} — nothing to check.\n", .{rules_path});
-            std.debug.print("Create .tdlearn/rules.toml to define constraints.\n", .{});
-        }
-        return error.NoRulesFile;
-    };
-
-    const config = try core.rules.parseRules(aa, rules_contents);
-
-    // Run analysis
-    const result = try runAnalysis(aa, io, path);
+    const rules_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/rules.toml", .{path});
+    const rules_contents = readFileOrNull(arena, io, rules_path) orelse return error.NoRulesFile;
+    const config = try core.rules.parseRules(arena, rules_contents);
+    const result = try runAnalysis(arena, io, path);
     const report = result.report;
-
-    // Build check input
-    const edges = try aa.alloc(core.rules.CheckInput.Edge, result.import_edges.len);
-    for (result.import_edges, 0..) |e, i| {
-        edges[i] = .{ .from = e.from_file, .to = e.to_file };
+    const edges = try arena.alloc(core.rules.CheckInput.Edge, result.import_edges.len);
+    for (result.import_edges, 0..) |edge, index| {
+        edges[index] = .{ .from = edge.from_file, .to = edge.to_file };
     }
     const input = core.rules.CheckInput{
         .quality_signal = report.quality_signal,
@@ -615,18 +610,43 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
         .import_edges = edges,
         .file_paths = result.file_paths,
     };
+    return .{
+        .report = report,
+        .check = try core.rules.checkRules(arena, &config, &input),
+    };
+}
 
-    const check = try core.rules.checkRules(aa, &config, &input);
+fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const execution = evaluateCheck(aa, io, path) catch |err| {
+        if (err == error.NoRulesFile) {
+            const rules_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/rules.toml", .{path});
+            if (json_flag) {
+                try printJsonError(io, aa, error.NoRulesFile);
+            } else {
+                std.debug.print("No rules file at {s} — nothing to check.\n", .{rules_path});
+                std.debug.print("Create .tdlearn/rules.toml to define constraints.\n", .{});
+            }
+        }
+        return err;
+    };
+    const report = execution.report;
+    const check = execution.check;
 
     if (json_flag) {
         var json_violations = try aa.alloc(JsonViolation, check.violations.len);
-        for (check.violations, 0..) |v, i| {
-            json_violations[i] = .{
-                .rule = v.rule,
-                .severity = v.severity.label(),
-                .message = v.message,
-                .from = if (v.files.len >= 2) v.files[0] else null,
-                .to = if (v.files.len >= 2) v.files[1] else null,
+        for (check.violations, 0..) |violation, index| {
+            json_violations[index] = .{
+                .rule = violation.rule,
+                .severity = violation.severity.label(),
+                .message = violation.message,
+                .from = if (violation.files.len >= 2) violation.files[0] else null,
+                .to = if (violation.files.len >= 2) violation.files[1] else null,
             };
         }
         const payload = JsonCheck{
@@ -645,24 +665,66 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
         return;
     }
 
-    // Print results
     std.debug.print("tdlearn check — {d} rules checked\n", .{check.rules_checked});
     std.debug.print("Quality: {d}/10000\n", .{report.quality_signal_int});
-
     if (check.violations.len == 0) {
         std.debug.print("All rules passed\n", .{});
         return;
     }
-
-    for (check.violations) |v| {
-        std.debug.print("x [{s}] {s}: {s}\n", .{ v.severity.label(), v.rule, v.message });
-        if (v.files.len >= 2) {
-            std.debug.print("    {s} -> {s}\n", .{ v.files[0], v.files[1] });
+    for (check.violations) |violation| {
+        std.debug.print("x [{s}] {s}: {s}\n", .{ violation.severity.label(), violation.rule, violation.message });
+        if (violation.files.len >= 2) {
+            std.debug.print("    {s} -> {s}\n", .{ violation.files[0], violation.files[1] });
         }
     }
-
     std.debug.print("\n{d} violation(s)\n", .{check.violations.len});
     return error.CheckFailed;
+}
+
+fn saveGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateSaveExecution {
+    try validateRoot(io, path);
+    const baseline_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/baseline.json", .{path});
+    const result = try runAnalysis(arena, io, path);
+    const baseline = core.baseline.Baseline{
+        .quality_signal = result.report.quality_signal,
+        .cycle_count = result.report.root_cause_raw.cycle_count,
+        .max_depth = result.report.root_cause_raw.max_depth,
+        .total_functions = result.report.total_functions,
+        .dead_functions = result.report.dead_functions,
+        .duplicate_functions = result.report.duplicate_functions,
+    };
+    const json = try core.baseline.writeBaseline(arena, baseline);
+    const dir_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn", .{path});
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    const temp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{baseline_path});
+    const file = try std.Io.Dir.cwd().createFile(io, temp_path, .{});
+    errdefer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+    defer file.close(io);
+    try file.writePositionalAll(io, json, 0);
+    try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), baseline_path, io);
+    return .{ .report = result.report };
+}
+
+fn compareGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateCompareExecution {
+    try validateRoot(io, path);
+    const baseline_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/baseline.json", .{path});
+    const baseline_contents = readFileOrNull(arena, io, baseline_path) orelse return error.NoBaseline;
+    const baseline = try core.baseline.readBaseline(arena, baseline_contents);
+    const result = try runAnalysis(arena, io, path);
+    const current = core.baseline.Baseline{
+        .quality_signal = result.report.quality_signal,
+        .cycle_count = result.report.root_cause_raw.cycle_count,
+        .max_depth = result.report.root_cause_raw.max_depth,
+        .total_functions = result.report.total_functions,
+        .dead_functions = result.report.dead_functions,
+        .duplicate_functions = result.report.duplicate_functions,
+    };
+    return .{
+        .baseline = baseline,
+        .current = current,
+        .report = result.report,
+        .violations = try baseline.diff(current, arena),
+    };
 }
 
 fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void {
@@ -672,34 +734,10 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     const aa = arena.allocator();
-    try validateRoot(io, path);
-
     const baseline_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/baseline.json", .{path});
 
     if (save_mode) {
-        // Run analysis and save baseline
-        const result = try runAnalysis(aa, io, path);
-        const b = core.baseline.Baseline{
-            .quality_signal = result.report.quality_signal,
-            .cycle_count = result.report.root_cause_raw.cycle_count,
-            .max_depth = result.report.root_cause_raw.max_depth,
-            .total_functions = result.report.total_functions,
-            .dead_functions = result.report.dead_functions,
-            .duplicate_functions = result.report.duplicate_functions,
-        };
-        const json = try core.baseline.writeBaseline(aa, b);
-
-        // Ensure .tdlearn dir exists
-        const dir_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn", .{path});
-        try std.Io.Dir.cwd().createDirPath(io, dir_path);
-
-        const temp_path = try std.fmt.allocPrint(aa, "{s}.tmp", .{baseline_path});
-        const file = try std.Io.Dir.cwd().createFile(io, temp_path, .{});
-        errdefer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
-        defer file.close(io);
-        try file.writePositionalAll(io, json, 0);
-        try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), baseline_path, io);
-
+        const execution = try saveGate(aa, io, path);
         if (json_flag) {
             const payload = JsonGateSave{
                 .schema_version = json_schema_version,
@@ -708,43 +746,30 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
                 .root = path,
                 .units = jsonUnits(),
                 .saved = true,
-                .quality_signal = result.report.quality_signal_int,
-                .metrics = gateMetricsFromReport(result.report),
+                .quality_signal = execution.report.quality_signal_int,
+                .metrics = gateMetricsFromReport(execution.report),
             };
             try printJsonStdout(io, aa, payload);
             return;
         }
-
         std.debug.print("tdlearn gate — baseline saved\n", .{});
-        std.debug.print("Quality: {d}/10000\n", .{result.report.quality_signal_int});
+        std.debug.print("Quality: {d}/10000\n", .{execution.report.quality_signal_int});
         std.debug.print("Baseline written to {s}\n", .{baseline_path});
         return;
     }
 
-    // Compare mode: load baseline, rescan, diff
-    const baseline_contents = readFileOrNull(aa, io, baseline_path) orelse {
-        if (json_flag) {
-            try printJsonError(io, aa, error.NoBaseline);
-        } else {
-            std.debug.print("No baseline at {s}\n", .{baseline_path});
-            std.debug.print("Run 'tdlearn gate --save' first to create one.\n", .{});
+    const execution = compareGate(aa, io, path) catch |err| {
+        if (err == error.NoBaseline) {
+            if (json_flag) {
+                try printJsonError(io, aa, error.NoBaseline);
+            } else {
+                std.debug.print("No baseline at {s}\n", .{baseline_path});
+                std.debug.print("Run 'tdlearn gate --save' first to create one.\n", .{});
+            }
         }
-        return error.NoBaseline;
+        return err;
     };
-    const saved = try core.baseline.readBaseline(aa, baseline_contents);
-
-    const result = try runAnalysis(aa, io, path);
-    const current = core.baseline.Baseline{
-        .quality_signal = result.report.quality_signal,
-        .cycle_count = result.report.root_cause_raw.cycle_count,
-        .max_depth = result.report.root_cause_raw.max_depth,
-        .total_functions = result.report.total_functions,
-        .dead_functions = result.report.dead_functions,
-        .duplicate_functions = result.report.duplicate_functions,
-    };
-
-    const violations = try saved.diff(current, aa);
-
+    const violations = execution.violations;
     if (json_flag) {
         const payload = JsonGate{
             .schema_version = json_schema_version,
@@ -753,9 +778,9 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
             .root = path,
             .units = jsonUnits(),
             .pass = violations.len == 0,
-            .quality_signal = result.report.quality_signal_int,
-            .baseline = gateMetricsFromBaseline(saved),
-            .current = gateMetricsFromReport(result.report),
+            .quality_signal = execution.report.quality_signal_int,
+            .baseline = gateMetricsFromBaseline(execution.baseline),
+            .current = gateMetricsFromReport(execution.report),
             .violations = violations,
         };
         try printJsonStdout(io, aa, payload);
@@ -765,19 +790,17 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
 
     std.debug.print("tdlearn gate — structural regression check\n", .{});
     std.debug.print("Quality:  {d} -> {d} (per 10000)\n", .{
-        @as(u32, @intFromFloat(saved.quality_signal * 10000)),
-        result.report.quality_signal_int,
+        @as(u32, @intFromFloat(execution.baseline.quality_signal * 10000)),
+        execution.report.quality_signal_int,
     });
-    std.debug.print("Cycles:  {d} -> {d}\n", .{ saved.cycle_count, current.cycle_count });
-    std.debug.print("Depth:   {d} -> {d}\n", .{ saved.max_depth, current.max_depth });
-
+    std.debug.print("Cycles:  {d} -> {d}\n", .{ execution.baseline.cycle_count, execution.current.cycle_count });
+    std.debug.print("Depth:   {d} -> {d}\n", .{ execution.baseline.max_depth, execution.current.max_depth });
     if (violations.len == 0) {
         std.debug.print("No degradation detected\n", .{});
         return;
     }
-
-    for (violations) |v| {
-        std.debug.print("x {s}\n", .{v});
+    for (violations) |violation| {
+        std.debug.print("x {s}\n", .{violation});
     }
     std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
     return error.GateFailed;
@@ -814,6 +837,48 @@ test "analysis pipeline runs against a temporary project" {
     try std.testing.expectEqual(@as(usize, 1), result.import_edges.len);
     try std.testing.expectEqual(@as(u32, 2), result.report.total_functions);
     try std.testing.expectEqual(@as(u32, 0), result.report.dead_functions);
+}
+
+test "temporary project supports check and gate evaluation" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
+    src_dir.close(io);
+    var rules_dir = try tmp.dir.createDirPathOpen(io, ".tdlearn", .{});
+    rules_dir.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".tdlearn/rules.toml",
+        .data = "[constraints]\nmin_quality = 0.0\n",
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const check = try evaluateCheck(arena.allocator(), io, project_path);
+    try std.testing.expect(check.check.pass());
+    const saved = try saveGate(arena.allocator(), io, project_path);
+    try std.testing.expectEqual(@as(u32, 1), saved.report.file_count);
+    const compared = try compareGate(arena.allocator(), io, project_path);
+    try std.testing.expectEqual(@as(usize, 0), compared.violations.len);
+}
+
+test "temporary invalid rules are rejected before output" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var rules_dir = try tmp.dir.createDirPathOpen(io, ".tdlearn", .{});
+    rules_dir.close(io);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".tdlearn/rules.toml",
+        .data = "[constraints]\nmin_quality = 2.0\n",
+    });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.InvalidRules, evaluateCheck(arena.allocator(), io, project_path));
 }
 
 test "filter source paths excludes non-source files" {

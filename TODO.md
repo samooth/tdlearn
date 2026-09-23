@@ -225,7 +225,7 @@ Prioridades:
 
 - Referencias: `build.zig:61-80`, `src/main.zig`.
 - [x] Cubrir el pipeline `Walker → GraphBuilder → extractores → grafos → computeHealth`.
-- [ ] Probar `scan`, `check`, `gate` y `gate --save` sobre proyectos temporales.
+- [x] Probar `scan`, `check`, `gate` y `gate --save` sobre proyectos temporales.
 - [ ] Cubrir stdout, stderr, JSON, códigos de salida, paths inválidos, archivos grandes, Unicode y symlinks.
 - [ ] Ejecutar Debug y ReleaseSafe en Linux, macOS y Windows.
 - [ ] Añadir benchmarks para repositorios grandes y verificar que no hay crecimiento cuadrático.
