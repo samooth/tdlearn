@@ -31,10 +31,15 @@ pub const FunctionExtractor = struct {
                 continue;
             }
 
-            const decl = detectDecl(line, lang) orelse continue;
+            const base_decl = detectDecl(line, lang) orelse continue;
+            var decl = base_decl;
+            const start_indent = indentation(raw_line);
+            if (langKind(lang) == .python) {
+                decl.is_method = start_indent > 0;
+            }
 
-            // Find body end via brace matching (approximate: count braces from decl line)
-            const end_line = findBodyEnd(contents, line_no, decl.open_brace) catch line_no;
+            // Find body end via brace matching or Python indentation.
+            const end_line = findBodyEnd(contents, line_no, decl.open_brace, start_indent) catch line_no;
             const is_public = decl.pub_keyword;
 
             try funcs.append(allocator, .{
@@ -299,6 +304,20 @@ pub const FunctionExtractor = struct {
         return false;
     }
 
+    fn indentation(line: []const u8) u32 {
+        var result: u32 = 0;
+        for (line) |character| {
+            if (character == ' ') {
+                result += 1;
+            } else if (character == '\t') {
+                result += 4;
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+
     fn isIdentChar(c: u8) bool {
         return std.ascii.isAlphanumeric(c) or c == '_';
     }
@@ -314,16 +333,25 @@ pub const FunctionExtractor = struct {
     }
 
     /// Find the last line of a function body by brace matching from the decl line.
-    /// For indentation languages (python) falls back to next-def boundary.
-    fn findBodyEnd(contents: []const u8, start_line: u32, uses_braces: bool) !u32 {
+    /// For indentation languages (python) uses the next same-or-lower indent boundary.
+    fn findBodyEnd(contents: []const u8, start_line: u32, uses_braces: bool, start_indent: u32) !u32 {
         var total_lines: u32 = 0;
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |_| total_lines += 1;
 
         if (!uses_braces) {
-            // Python: body ends at next line with same-or-lower indentation that is non-empty.
-            // Approximation: skip to next "def " or "class " or end.
-            return total_lines; // coarse — refined per-function later if needed
+            var line_no: u32 = 0;
+            var last_content_line = start_line;
+            var iter = std.mem.splitScalar(u8, contents, '\n');
+            while (iter.next()) |raw| {
+                line_no += 1;
+                if (line_no <= start_line) continue;
+                const trimmed = std.mem.trim(u8, raw, " \t\r");
+                if (trimmed.len == 0) continue;
+                if (indentation(raw) <= start_indent) return last_content_line;
+                last_content_line = line_no;
+            }
+            return last_content_line;
         }
 
         // Brace matching: walk from start_line, count { and }
@@ -464,8 +492,29 @@ test "python def extraction" {
     const funcs = try FunctionExtractor.extract(arena.allocator(), src, "python");
     try std.testing.expectEqual(@as(usize, 3), funcs.len);
     try std.testing.expectEqualStrings("top_level", funcs[0].name);
+    try std.testing.expect(!funcs[0].is_method);
+    try std.testing.expect(funcs[0].end_line < funcs[1].start_line);
     try std.testing.expectEqualStrings("async_fn", funcs[1].name);
     try std.testing.expectEqualStrings("method", funcs[2].name);
+    try std.testing.expect(funcs[2].is_method);
+}
+
+test "python function extents stop at next definition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        "def first():\n" ++
+        "    value = 1\n" ++
+        "\n" ++
+        "def second():\n" ++
+        "    return value\n";
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "python");
+    try std.testing.expectEqual(@as(usize, 2), funcs.len);
+    try std.testing.expectEqual(@as(u32, 1), funcs[0].start_line);
+    try std.testing.expectEqual(@as(u32, 2), funcs[0].end_line);
+    try std.testing.expectEqual(@as(u32, 2), funcs[0].line_count);
+    try std.testing.expectEqual(@as(u32, 4), funcs[1].start_line);
+    try std.testing.expectEqual(@as(u32, 5), funcs[1].end_line);
 }
 
 test "js function extraction" {

@@ -84,13 +84,13 @@ Prioridades:
 - [x] Hacer que graphs, `file_count`, líneas y Gini usen el mismo universo de datos.
 - [ ] Añadir fixtures end-to-end con archivos no fuente.
 
-### [ ] ANALYSIS-002 — Corregir la extracción de funciones Python
+### [x] ANALYSIS-002 — Corregir la extracción de funciones Python
 
 - Referencias: `src/analysis/functions.zig:150-167,316-361`.
-- [ ] Calcular `start_line`, `end_line` y `line_count` mediante indentación y declaraciones siguientes.
-- [ ] Detectar correctamente métodos y conservar su alcance.
-- [ ] Evitar solapamientos entre funciones consecutivas y soporte para defs anidados, docstrings y funciones de una línea.
-- [ ] Verificar que llamadas, duplicados y `max_fn_lines` reciben el cuerpo correcto.
+- [x] Calcular `start_line`, `end_line` y `line_count` mediante indentación y declaraciones siguientes.
+- [x] Detectar correctamente métodos y conservar su alcance.
+- [x] Evitar solapamientos entre funciones consecutivas y soporte para defs anidados, docstrings y funciones de una línea.
+- [x] Verificar que llamadas, duplicados y `max_fn_lines` reciben el cuerpo correcto.
 
 ### [ ] ANALYSIS-003 — Completar extractores de imports
 
