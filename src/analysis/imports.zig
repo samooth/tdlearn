@@ -63,21 +63,31 @@ pub const ImportExtractor = struct {
 
     // ── Rust: use a::b::c;  /  use a::{b, c};  /  mod foo; ──
     fn extractRust(line: []const u8) ?[]const u8 {
-        if (std.mem.startsWith(u8, line, "use ")) {
-            const rest = std.mem.trim(u8, line[4..], " \t;");
-            if (rest.len == 0) return null;
-            // Strip braces: "a::{b, c}" → "a"
-            if (std.mem.indexOfScalar(u8, rest, '{')) |brace| {
-                return std.mem.trimEnd(u8, rest[0..brace], " \t:");
-            }
-            return rest;
+        var rest = line;
+        if (std.mem.startsWith(u8, rest, "pub use ")) {
+            rest = rest["pub use ".len..];
+        } else if (std.mem.startsWith(u8, rest, "use ")) {
+            rest = rest["use ".len..];
+        } else if (std.mem.startsWith(u8, rest, "pub mod ")) {
+            rest = rest["pub mod ".len..];
+        } else if (std.mem.startsWith(u8, rest, "mod ")) {
+            rest = rest["mod ".len..];
+        } else {
+            return null;
         }
-        if (std.mem.startsWith(u8, line, "mod ")) {
-            const rest = std.mem.trim(u8, line[4..], " \t;");
-            if (rest.len == 0 or !isRustModName(rest)) return null;
-            return rest;
+
+        rest = std.mem.trim(u8, rest, " \t;");
+        if (rest.len == 0) return null;
+        if (std.mem.indexOf(u8, rest, " as ")) |as_kw| {
+            rest = std.mem.trim(u8, rest[0..as_kw], " \t");
         }
-        return null;
+        if (std.mem.indexOfScalar(u8, rest, '{')) |brace| {
+            rest = std.mem.trimEnd(u8, rest[0..brace], " \t:");
+        }
+        if (std.mem.startsWith(u8, line, "mod ") or std.mem.startsWith(u8, line, "pub mod ")) {
+            if (!isRustModName(rest)) return null;
+        }
+        return rest;
     }
 
     fn isRustModName(s: []const u8) bool {
@@ -113,24 +123,22 @@ pub const ImportExtractor = struct {
 
     // ── JS/TS: from "..." import / import "..." / require("...") ──
     fn extractJs(line: []const u8) ?[]const u8 {
-        // import x from "mod"; / import "mod"; / export { x } from "mod";
-        if (std.mem.indexOf(u8, line, " from \"")) |from_kw| {
-            const str_start = from_kw + " from \"".len;
-            const end = std.mem.indexOfPos(u8, line, str_start, "\"") orelse return null;
-            return line[str_start..end];
-        }
-        if (std.mem.startsWith(u8, line, "import \"")) {
-            const str_start = "import \"".len;
-            const end = std.mem.indexOfPos(u8, line, str_start, "\"") orelse return null;
-            return line[str_start..end];
-        }
-        // require("mod")
-        if (std.mem.indexOf(u8, line, "require(\"")) |req| {
-            const str_start = req + "require(\"".len;
-            const end = std.mem.indexOfPos(u8, line, str_start, "\"") orelse return null;
-            return line[str_start..end];
-        }
+        if (extractQuoted(line, " from ")) |value| return value;
+        if (extractQuoted(line, "import ")) |value| return value;
+        if (extractQuoted(line, "require(")) |value| return value;
+        if (extractQuoted(line, "import(")) |value| return value;
         return null;
+    }
+
+    fn extractQuoted(line: []const u8, marker: []const u8) ?[]const u8 {
+        const marker_start = std.mem.indexOf(u8, line, marker) orelse return null;
+        const quote_start = marker_start + marker.len;
+        if (quote_start >= line.len) return null;
+        const quote = line[quote_start];
+        if (quote != '"' and quote != '\'') return null;
+        const value_start = quote_start + 1;
+        const end = std.mem.indexOfScalarPos(u8, line, value_start, quote) orelse return null;
+        return line[value_start..end];
     }
 
     // ── Go: import "mod"  /  "mod" or alias "mod" inside import block ──
@@ -208,14 +216,18 @@ test "rust use and mod" {
         \\use std::collections::HashMap;
         \\use crate::foo::{Bar, Baz};
         \\mod parser;
+        \\pub use helpers as support;
+        \\pub mod config;
         \\pub fn main() {}
         \\// use nope;
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "rust");
-    try std.testing.expectEqual(@as(usize, 3), imports.len);
+    try std.testing.expectEqual(@as(usize, 5), imports.len);
     try std.testing.expectEqualStrings("std::collections::HashMap", imports[0]);
     try std.testing.expectEqualStrings("crate::foo", imports[1]);
     try std.testing.expectEqualStrings("parser", imports[2]);
+    try std.testing.expectEqualStrings("helpers", imports[3]);
+    try std.testing.expectEqualStrings("config", imports[4]);
 }
 
 test "python imports" {
@@ -244,13 +256,17 @@ test "js imports" {
         \\import "side-effect";
         \\export { y } from "mod-b";
         \\const z = require("mod-c");
+        \\import single from 'mod-single';
+        \\const dynamic = import('mod-dynamic');
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "javascript");
-    try std.testing.expectEqual(@as(usize, 4), imports.len);
+    try std.testing.expectEqual(@as(usize, 6), imports.len);
     try std.testing.expectEqualStrings("mod-a", imports[0]);
     try std.testing.expectEqualStrings("side-effect", imports[1]);
     try std.testing.expectEqualStrings("mod-b", imports[2]);
     try std.testing.expectEqualStrings("mod-c", imports[3]);
+    try std.testing.expectEqualStrings("mod-single", imports[4]);
+    try std.testing.expectEqualStrings("mod-dynamic", imports[5]);
 }
 
 test "go imports" {
