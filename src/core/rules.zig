@@ -618,61 +618,97 @@ fn layerOf(layers: []const RulesConfig.Layer, path: []const u8) ?*const RulesCon
     return null;
 }
 
+fn pathBaseName(path: []const u8) []const u8 {
+    const separator = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[separator + 1 ..];
+}
+
 /// Glob matcher supporting:
 ///   exact match, `*` (single segment), `**` (any depth),
 ///   `dir/**`, `dir/*`, `dir/prefix...`
 pub fn globMatch(pattern: []const u8, path: []const u8) bool {
-    // Exact match
     if (std.mem.eql(u8, pattern, path)) return true;
+    if (matchSegments(pattern, path)) return true;
 
-    // "dir/**" or "dir/**/*" — everything under dir
-    if (std.mem.endsWith(u8, pattern, "/**")) {
-        const prefix = pattern[0 .. pattern.len - 3];
-        return std.mem.startsWith(u8, path, prefix) and
-            (std.mem.eql(u8, path, prefix) or
-                (path.len > prefix.len and path[prefix.len] == '/'));
-    }
-    if (std.mem.endsWith(u8, pattern, "/**/*")) {
-        const prefix = pattern[0 .. pattern.len - 5];
-        return std.mem.startsWith(u8, path, prefix) and
-            path.len > prefix.len and path[prefix.len] == '/';
+    if (std.mem.indexOfScalar(u8, pattern, '/') == null) {
+        return matchSegment(pattern, pathBaseName(path));
     }
 
-    // "dir/*" — single-segment children
-    if (std.mem.endsWith(u8, pattern, "/*")) {
-        const prefix = pattern[0 .. pattern.len - 2];
-        if (!std.mem.startsWith(u8, path, prefix)) return false;
-        if (path.len <= prefix.len or path[prefix.len] != '/') return false;
-        const rest = path[prefix.len + 1 ..];
-        return std.mem.indexOfScalar(u8, rest, '/') == null;
-    }
-
-    // "*.ext" — any file with that extension
-    if (std.mem.startsWith(u8, pattern, "*.")) {
-        const ext = pattern[1..];
-        return std.mem.endsWith(u8, path, ext);
-    }
-
-    // Directory prefix: "src/core" matches "src/core/anything"
-    if (std.mem.startsWith(u8, path, pattern) and
+    if (std.mem.indexOfScalar(u8, pattern, '*') == null and
+        std.mem.indexOfScalar(u8, pattern, '?') == null and
         path.len > pattern.len and
+        std.mem.startsWith(u8, path, pattern) and
         path[pattern.len] == '/')
     {
         return true;
     }
 
-    // Single `*` wildcard within the last segment: "src/foo*.zig"
-    if (std.mem.indexOfScalar(u8, pattern, '*')) |star| {
-        if (std.mem.indexOfScalarPos(u8, pattern, star + 1, '*') == null) {
-            const prefix = pattern[0..star];
-            const suffix = pattern[star + 1 ..];
-            return std.mem.startsWith(u8, path, prefix) and
-                std.mem.endsWith(u8, path, suffix) and
-                path.len >= prefix.len + suffix.len;
+    return false;
+}
+
+fn matchSegments(pattern: []const u8, path: []const u8) bool {
+    return matchSegmentsAt(pattern, 0, path, 0);
+}
+
+fn matchSegmentsAt(pattern: []const u8, pattern_start: usize, path: []const u8, path_start: usize) bool {
+    if (pattern_start >= pattern.len) return path_start >= path.len;
+
+    const pattern_end = segmentEnd(pattern, pattern_start);
+    const segment = pattern[pattern_start..pattern_end];
+    if (std.mem.eql(u8, segment, "**")) {
+        const next_pattern = if (pattern_end < pattern.len) pattern_end + 1 else pattern_end;
+        if (next_pattern >= pattern.len) return true;
+
+        var current = path_start;
+        while (true) {
+            if (matchSegmentsAt(pattern, next_pattern, path, current)) return true;
+            if (current >= path.len) return false;
+            const end = segmentEnd(path, current);
+            current = if (end < path.len) end + 1 else end;
         }
     }
 
-    return false;
+    if (path_start >= path.len) return false;
+    const path_end = segmentEnd(path, path_start);
+    if (!matchSegment(segment, path[path_start..path_end])) return false;
+    const next_pattern = if (pattern_end < pattern.len) pattern_end + 1 else pattern_end;
+    const next_path = if (path_end < path.len) path_end + 1 else path_end;
+    return matchSegmentsAt(pattern, next_pattern, path, next_path);
+}
+
+fn segmentEnd(value: []const u8, start: usize) usize {
+    const relative_end = std.mem.indexOfScalarPos(u8, value, start, '/') orelse return value.len;
+    return relative_end;
+}
+
+fn matchSegment(pattern: []const u8, text: []const u8) bool {
+    var pattern_index: usize = 0;
+    var text_index: usize = 0;
+    var star_index: ?usize = null;
+    var star_text_index: usize = 0;
+
+    while (text_index < text.len) {
+        if (pattern_index < pattern.len and
+            (pattern[pattern_index] == '?' or pattern[pattern_index] == text[text_index]))
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
+            star_index = pattern_index;
+            star_text_index = text_index;
+            pattern_index += 1;
+        } else if (star_index) |star| {
+            pattern_index = star + 1;
+            star_text_index += 1;
+            if (star_text_index > text.len) return false;
+            text_index = star_text_index;
+        } else {
+            return false;
+        }
+    }
+
+    while (pattern_index < pattern.len and pattern[pattern_index] == '*') pattern_index += 1;
+    return pattern_index == pattern.len;
 }
 
 // ── Tests ─────────────────────────────────────────────────────
@@ -690,6 +726,14 @@ test "glob match basics" {
     try std.testing.expect(!globMatch("*.zig", "file.rs"));
     try std.testing.expect(globMatch("src/foo*.zig", "src/foobar.zig"));
     try std.testing.expect(!globMatch("src/foo*.zig", "src/bar.zig"));
+}
+
+test "glob segment boundaries" {
+    try std.testing.expect(globMatch("src/**/test.zig", "src/a/b/test.zig"));
+    try std.testing.expect(!globMatch("src/*/test.zig", "src/a/b/test.zig"));
+    try std.testing.expect(globMatch("**/*.zig", "a/b.zig"));
+    try std.testing.expect(!globMatch("src/*.zig", "src/a/b.zig"));
+    try std.testing.expect(globMatch("src/core", "src/core/types.zig"));
 }
 
 test "parse rules constraints" {

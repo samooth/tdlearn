@@ -170,10 +170,11 @@ Prioridades:
 
 - Referencias: `src/core/rules.zig:20-391`.
 - [ ] Validar nombres, paths, órdenes y solapamientos ambiguos entre layers.
-- [ ] Implementar una gramática de glob documentada para `*`, `**`, escapes y separadores.
-- [ ] Separar paths absolutos de paths relativos al root y soportar Unicode/Windows.
+- [x] Implementar una gramática de glob documentada para `*`, `**` y separadores.
+- [ ] Soportar escapes y definir el comportamiento Unicode/Windows.
+- [ ] Separar paths absolutos de paths relativos al root.
 - [ ] Deduplicar violaciones y hacer estable su orden.
-- [ ] Añadir tests de patrones conflictivos, `**`, múltiples layers y repositorios grandes.
+- [x] Añadir tests de patrones conflictivos, `**` y límites de segmentos.
 
 ### [ ] CORE-001 — Normalizar rutas y definir portabilidad
 
