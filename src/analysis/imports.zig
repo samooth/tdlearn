@@ -25,6 +25,11 @@ pub const ImportExtractor = struct {
             if (std.mem.startsWith(u8, line, "//")) continue;
             if (lang_kind != .c and lang_kind != .cpp and std.mem.startsWith(u8, line, "#")) continue;
 
+            if (lang_kind == .python) {
+                try extractPythonImports(allocator, &result, line);
+                continue;
+            }
+
             const raw: ?[]const u8 = switch (lang_kind) {
                 .zig => extractZig(line),
                 .rust => extractRust(line),
@@ -97,6 +102,26 @@ pub const ImportExtractor = struct {
             if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
         }
         return true;
+    }
+
+    fn extractPythonImports(allocator: Allocator, result: *std.ArrayList([]const u8), line: []const u8) !void {
+        if (std.mem.startsWith(u8, line, "import ")) {
+            const rest = std.mem.trim(u8, line["import ".len..], " \t;");
+            var parts = std.mem.splitScalar(u8, rest, ',');
+            while (parts.next()) |part| {
+                var module = std.mem.trim(u8, part, " \t;");
+                if (std.mem.indexOf(u8, module, " as ")) |as_kw| {
+                    module = std.mem.trim(u8, module[0..as_kw], " \t");
+                }
+                if (module.len > 0) try appendUnique(allocator, result, module);
+            }
+            return;
+        }
+        if (extractPython(line)) |module| try appendUnique(allocator, result, module);
+    }
+
+    fn appendUnique(allocator: Allocator, result: *std.ArrayList([]const u8), raw: []const u8) !void {
+        if (raw.len > 0 and !contains(result.items, raw)) try result.append(allocator, raw);
     }
 
     // ── Python: import a.b.c  /  from a.b import c ──
@@ -234,18 +259,19 @@ test "python imports" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
-        \\import os
+        \\import os, sys
         \\import numpy as np
         \\from mypkg.sub import helper
         \\from .relative import thing
         \\# import nope
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "python");
-    try std.testing.expectEqual(@as(usize, 4), imports.len);
+    try std.testing.expectEqual(@as(usize, 5), imports.len);
     try std.testing.expectEqualStrings("os", imports[0]);
-    try std.testing.expectEqualStrings("numpy", imports[1]);
-    try std.testing.expectEqualStrings("mypkg.sub", imports[2]);
-    try std.testing.expectEqualStrings(".relative", imports[3]);
+    try std.testing.expectEqualStrings("sys", imports[1]);
+    try std.testing.expectEqualStrings("numpy", imports[2]);
+    try std.testing.expectEqualStrings("mypkg.sub", imports[3]);
+    try std.testing.expectEqualStrings(".relative", imports[4]);
 }
 
 test "js imports" {
@@ -258,15 +284,20 @@ test "js imports" {
         \\const z = require("mod-c");
         \\import single from 'mod-single';
         \\const dynamic = import('mod-dynamic');
+        \\import {
+        \\    first,
+        \\    second,
+        \\} from "mod-multiline";
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "javascript");
-    try std.testing.expectEqual(@as(usize, 6), imports.len);
+    try std.testing.expectEqual(@as(usize, 7), imports.len);
     try std.testing.expectEqualStrings("mod-a", imports[0]);
     try std.testing.expectEqualStrings("side-effect", imports[1]);
     try std.testing.expectEqualStrings("mod-b", imports[2]);
     try std.testing.expectEqualStrings("mod-c", imports[3]);
     try std.testing.expectEqualStrings("mod-single", imports[4]);
     try std.testing.expectEqualStrings("mod-dynamic", imports[5]);
+    try std.testing.expectEqualStrings("mod-multiline", imports[6]);
 }
 
 test "go imports" {

@@ -97,7 +97,8 @@ Prioridades:
 - Referencias: `src/analysis/imports.zig:19-167`.
 - [ ] Filtrar comentarios, strings y template literals antes de extraer dependencias.
 - [x] Soportar comillas simples/dobles, aliases y `import()`/`require()`.
-- [ ] Soportar imports agrupados y multilínea.
+- [x] Soportar imports agrupados de Python y la forma multilínea común de JS.
+- [ ] Completar formas multilínea de Python/JS y bloques más complejos.
 - [ ] Resolver correctamente imports relativos de Python, `self`/`super` de Rust y variantes de Rust/Go.
 - [ ] No interpretar strings balanceados como imports fuera de un bloque válido.
 - [ ] Añadir fixtures por lenguaje con casos positivos y negativos.
