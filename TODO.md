@@ -108,7 +108,7 @@ Prioridades:
 - Referencias: `src/analysis/resolver.zig:107-256`, `src/analysis/graph_builder.zig:67`.
 - [x] Añadir extensiones soportadas por el registry, como `.mjs`, `.mts`, `.hpp`, `.cc`, `.cxx`, `.hxx`, `.m` y `.mm`.
 - [x] Resolver rutas relativas anidadas y `self::`/`super::`.
-- [ ] Evitar que sufijos ambiguos se resuelvan al primer archivo según el orden del filesystem.
+- [x] Evitar que sufijos ambiguos se resuelvan al primer archivo según el orden del filesystem.
 - [ ] Aumentar el buffer para paths largos y probar Unicode, separadores nativos y paths anidados.
 - [ ] Hacer el resultado independiente del orden de recorrido.
 

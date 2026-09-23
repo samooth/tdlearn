@@ -19,6 +19,7 @@ pub const Resolver = struct {
     /// Map from module suffix → file index. "core/types" → src/core/types.zig
     /// Also registers package-index files: "core" → src/core/mod.rs
     suffix_index: std.StringHashMap(usize),
+    ambiguous_suffixes: std.StringHashMap(void),
     /// Package-name aliases: crate/package name → root source file path.
     alias_index: std.StringHashMap([]const u8),
     /// All known file paths (borrowed).
@@ -38,6 +39,8 @@ pub const Resolver = struct {
         errdefer path_index.deinit();
         var suffix_index = std.StringHashMap(usize).init(allocator);
         errdefer suffix_index.deinit();
+        var ambiguous_suffixes = std.StringHashMap(void).init(allocator);
+        errdefer ambiguous_suffixes.deinit();
         var alias_index = std.StringHashMap([]const u8).init(allocator);
         errdefer alias_index.deinit();
 
@@ -51,7 +54,11 @@ pub const Resolver = struct {
             var suffix = stem;
             while (true) {
                 const gop = try suffix_index.getOrPut(suffix);
-                if (!gop.found_existing) gop.value_ptr.* = i;
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = i;
+                } else if (gop.value_ptr.* != i) {
+                    try ambiguous_suffixes.put(suffix, {});
+                }
                 const sep = std.mem.indexOfScalar(u8, suffix, '/') orelse break;
                 suffix = suffix[sep + 1 ..];
             }
@@ -65,7 +72,11 @@ pub const Resolver = struct {
                     var parent_suffix = parent_stem;
                     while (true) {
                         const gop = try suffix_index.getOrPut(parent_suffix);
-                        if (!gop.found_existing) gop.value_ptr.* = i;
+                        if (!gop.found_existing) {
+                            gop.value_ptr.* = i;
+                        } else if (gop.value_ptr.* != i) {
+                            try ambiguous_suffixes.put(parent_suffix, {});
+                        }
                         const sep = std.mem.indexOfScalar(u8, parent_suffix, '/') orelse break;
                         parent_suffix = parent_suffix[sep + 1 ..];
                     }
@@ -81,6 +92,7 @@ pub const Resolver = struct {
         return .{
             .path_index = path_index,
             .suffix_index = suffix_index,
+            .ambiguous_suffixes = ambiguous_suffixes,
             .alias_index = alias_index,
             .file_paths = file_paths,
             .allocator = allocator,
@@ -90,6 +102,7 @@ pub const Resolver = struct {
     pub fn deinit(self: *Resolver) void {
         self.path_index.deinit();
         self.suffix_index.deinit();
+        self.ambiguous_suffixes.deinit();
         self.alias_index.deinit();
     }
 
@@ -175,13 +188,17 @@ pub const Resolver = struct {
     fn matchSuffixChain(self: *const Resolver, path: []const u8) ?[]const u8 {
         var suffix = path;
         while (true) {
-            if (self.suffix_index.get(suffix)) |idx| {
-                return self.file_paths[idx];
-            }
+            if (self.indexedPath(suffix)) |resolved| return resolved;
             const sep = std.mem.indexOfScalar(u8, suffix, '/') orelse return null;
             suffix = suffix[sep + 1 ..];
             if (suffix.len == 0) return null;
         }
+    }
+
+    fn indexedPath(self: *const Resolver, suffix: []const u8) ?[]const u8 {
+        if (self.ambiguous_suffixes.contains(suffix)) return null;
+        if (self.suffix_index.get(suffix)) |idx| return self.file_paths[idx];
+        return null;
     }
 
     fn resolveRustRelative(self: *const Resolver, sa: Allocator, raw: []const u8, from_file: []const u8) ?[]const u8 {
@@ -237,9 +254,9 @@ pub const Resolver = struct {
 
         if (self.matchWithExtensions(joined)) |path| return path;
         if (self.matchSuffixChain(joined)) |path| return path;
-        if (self.suffix_index.get(joined)) |idx| return self.file_paths[idx];
+        if (self.indexedPath(joined)) |resolved| return resolved;
         // Relative import might reference a package dir: "./core" → "core/mod.zig"
-        if (self.suffix_index.get(stripExt(joined))) |idx| return self.file_paths[idx];
+        if (self.indexedPath(stripExt(joined))) |resolved| return resolved;
         return null;
     }
 
@@ -319,6 +336,24 @@ test "exact path resolution" {
 
     try std.testing.expectEqualStrings("src/core/types.zig", resolver.resolve("core/types", "src/main.zig").?);
     try std.testing.expectEqualStrings("src/main.zig", resolver.resolve("src/main", "src/core/types.zig").?);
+}
+
+test "ambiguous suffixes do not resolve arbitrarily" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{
+        "src/a/types.zig",
+        "src/b/types.zig",
+        "src/a/core/mod.zig",
+        "src/b/core/mod.zig",
+    };
+    var resolver = try Resolver.init(arena.allocator(), &paths);
+    defer resolver.deinit();
+
+    try std.testing.expect(resolver.resolve("types", "src/main.zig") == null);
+    try std.testing.expectEqualStrings("src/a/types.zig", resolver.resolve("a/types", "src/main.zig").?);
+    try std.testing.expect(resolver.resolve("core", "src/main.zig") == null);
+    try std.testing.expectEqualStrings("src/a/core/mod.zig", resolver.resolve("a/core", "src/main.zig").?);
 }
 
 test "relative resolution" {
