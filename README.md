@@ -18,6 +18,8 @@ tdlearn computes five root cause metrics from your source code and produces a si
 - **Redundancy** — reachable dead code + exact normalized duplicate detection;
   no function data is treated conservatively as ratio `1.0`
 
+All graph and rule paths are canonical root-relative `/` paths; native filesystem roots are kept separate during walking, and symlinks/junctions are not followed.
+
 Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies.
 
 ## Build

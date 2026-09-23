@@ -2,6 +2,47 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 
+/// Canonical paths are root-relative, `/`-separated, case-sensitive byte
+/// paths. Filesystem roots and native separator paths remain the walker's
+/// responsibility; symlinks/junctions are not followed.
+/// Return true for POSIX, Windows drive, and UNC-style absolute paths.
+pub fn isAbsolutePath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (path[0] == '/' or path[0] == '\\') return true;
+    return path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':';
+}
+
+/// Canonicalize a root-relative path to `/` separators without `.` or `..`.
+/// The returned slice is owned by `allocator`.
+pub fn canonicalRelative(allocator: Allocator, path: []const u8) ![]const u8 {
+    if (path.len == 0) return allocator.dupe(u8, "");
+    if (isAbsolutePath(path)) return error.InvalidPath;
+    for (path) |character| {
+        if (character == 0) return error.InvalidPath;
+    }
+
+    var components = std.ArrayList([]const u8).empty;
+    defer components.deinit(allocator);
+    var segments = std.mem.splitAny(u8, path, "/\\");
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".")) continue;
+        if (std.mem.eql(u8, segment, "..")) {
+            if (components.items.len == 0) return error.InvalidPath;
+            _ = components.pop();
+            continue;
+        }
+        try components.append(allocator, segment);
+    }
+
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    for (components.items, 0..) |component, index| {
+        if (index > 0) try result.append(allocator, '/');
+        try result.appendSlice(allocator, component);
+    }
+    return try result.toOwnedSlice(allocator);
+}
+
 /// Adaptive module boundary detection.
 ///
 /// Extract module name from a path using directory depth:
@@ -18,11 +59,11 @@ const Allocator = std.mem.Allocator;
 ///   "db.zig"                        → "db"
 pub fn moduleOf(path: []const u8) []const u8 {
     // Find the first '/' to detect depth
-    const first_sep = indexOf(path, '/') orelse return stripExtension(path);
+    const first_sep = indexOfAny(path, "/\\") orelse return stripExtension(path);
 
     // Find second '/' to determine if we have depth >= 2
     const rest1 = path[first_sep + 1 ..];
-    const second_sep = indexOf(rest1, '/') orelse {
+    const second_sep = indexOfAny(rest1, "/\\") orelse {
         // Only one separator: depth-1
         return moduleOfSingleDir(path, first_sep);
     };
@@ -39,9 +80,9 @@ pub fn isSameModule(path_a: []const u8, path_b: []const u8) bool {
 /// Strip file extension, returning the stem.
 /// Ensures the dot is after the last '/' to avoid stripping directory dots.
 pub fn stripExtension(path: []const u8) []const u8 {
-    const last_sep = if (lastIndexOf(path, '/')) |i| i + 1 else 0;
+    const last_sep = if (lastSeparator(path)) |i| i + 1 else 0;
     const stem = path[last_sep..];
-    if (lastIndexOf(stem, '.')) |dot| {
+    if (std.mem.lastIndexOfScalar(u8, stem, '.')) |dot| {
         return path[0 .. last_sep + dot];
     }
     return path;
@@ -49,9 +90,9 @@ pub fn stripExtension(path: []const u8) []const u8 {
 
 /// Get file extension (without the dot), or empty string if none.
 pub fn extension(path: []const u8) []const u8 {
-    const last_sep = if (lastIndexOf(path, '/')) |i| i + 1 else 0;
+    const last_sep = if (lastSeparator(path)) |i| i + 1 else 0;
     const stem = path[last_sep..];
-    if (lastIndexOf(stem, '.')) |dot| {
+    if (std.mem.lastIndexOfScalar(u8, stem, '.')) |dot| {
         return stem[dot + 1 ..];
     }
     return "";
@@ -59,7 +100,7 @@ pub fn extension(path: []const u8) []const u8 {
 
 /// Get the file name (last path component).
 pub fn fileName(path: []const u8) []const u8 {
-    if (lastIndexOf(path, '/')) |sep| {
+    if (lastSeparator(path)) |sep| {
         return path[sep + 1 ..];
     }
     return path;
@@ -67,7 +108,7 @@ pub fn fileName(path: []const u8) []const u8 {
 
 /// Get the parent directory of a path.
 pub fn parentDir(path: []const u8) ?[]const u8 {
-    if (lastIndexOf(path, '/')) |sep| {
+    if (lastSeparator(path)) |sep| {
         return path[0..sep];
     }
     return null;
@@ -77,15 +118,16 @@ pub fn parentDir(path: []const u8) ?[]const u8 {
 pub fn depth(path: []const u8) u32 {
     var count: u32 = 0;
     for (path) |c| {
-        if (c == '/') count += 1;
+        if (c == '/' or c == '\\') count += 1;
     }
     return count;
 }
 
 /// Check if a file path is a conventional application entry point.
 ///
-/// Matches by filename: main.*, index.*, app.*, __main__.py, mod.rs at
-/// a "cmd/..." path (Go command layout), and build.zig.
+/// Matches by filename: main.*, index.*, app.*, __main__.py, and build.zig.
+/// Package-index conventions such as mod.rs are handled separately by
+/// isPackageIndexPath; they are not process entry points.
 /// Entry points are the BFS roots for the depth metric.
 pub fn isEntryPointPath(path: []const u8) bool {
     const name = fileName(path);
@@ -111,7 +153,17 @@ pub fn isEntryPointPath(path: []const u8) bool {
         if (std.mem.eql(u8, name, "app.py")) return true;
         // Go cmd layout: cmd/foo/main.go already covered by main.go;
         // Rust bin layout: src/bin/foo.rs
-        if (std.mem.endsWith(u8, p, "src/bin") and endsWithZigRs(name)) return true;
+        if ((std.mem.endsWith(u8, p, "src/bin") or std.mem.endsWith(u8, p, "src\\bin")) and endsWithZigRs(name)) return true;
+    }
+    return false;
+}
+
+/// Check whether a path is a language package/index entry convention.
+pub fn isPackageIndexPath(path: []const u8) bool {
+    const name = fileName(path);
+    const names = [_][]const u8{ "mod.rs", "__init__.py", "index.js", "index.ts", "lib.rs", "mod.zig" };
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
     }
     return false;
 }
@@ -124,7 +176,7 @@ fn endsWithZigRs(name: []const u8) bool {
 
 fn moduleOfDeep(path: []const u8, depth2_end: usize) []const u8 {
     const after_depth2 = path[depth2_end + 1 ..];
-    if (indexOf(after_depth2, '/')) |j| {
+    if (indexOfAny(after_depth2, "/\\")) |j| {
         return path[0 .. depth2_end + 1 + j];
     }
     return path[0..depth2_end];
@@ -150,22 +202,49 @@ pub fn isDominantDir(dir: []const u8) bool {
     return false;
 }
 
-/// Find index of first occurrence of byte in slice.
-fn indexOf(slice: []const u8, byte: u8) ?usize {
-    for (slice, 0..) |c, i| {
-        if (c == byte) return i;
+/// Find index of first occurrence of a path separator.
+fn indexOfAny(slice: []const u8, separators: []const u8) ?usize {
+    for (slice, 0..) |character, index| {
+        for (separators) |separator| {
+            if (character == separator) return index;
+        }
     }
     return null;
 }
 
-/// Find index of last occurrence of byte in slice.
-fn lastIndexOf(slice: []const u8, byte: u8) ?usize {
-    var i: usize = slice.len;
-    while (i > 0) {
-        i -= 1;
-        if (slice[i] == byte) return i;
+fn lastSeparator(slice: []const u8) ?usize {
+    var index = slice.len;
+    while (index > 0) {
+        index -= 1;
+        if (slice[index] == '/' or slice[index] == '\\') return index;
     }
     return null;
+}
+
+test "canonical relative paths" {
+    const canonical = try canonicalRelative(std.testing.allocator, "src\\layout\\..\\main.zig");
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expectEqualStrings("src/main.zig", canonical);
+
+    const root = try canonicalRelative(std.testing.allocator, "./src//./");
+    defer std.testing.allocator.free(root);
+    try std.testing.expectEqualStrings("src", root);
+
+    try std.testing.expectError(error.InvalidPath, canonicalRelative(std.testing.allocator, "../outside"));
+    try std.testing.expectError(error.InvalidPath, canonicalRelative(std.testing.allocator, "/absolute/path"));
+    try std.testing.expectError(error.InvalidPath, canonicalRelative(std.testing.allocator, "C:\\absolute"));
+    try std.testing.expectError(error.InvalidPath, canonicalRelative(std.testing.allocator, "\\\\server\\share"));
+    const dotted = try canonicalRelative(std.testing.allocator, ".config//./App.Main");
+    defer std.testing.allocator.free(dotted);
+    try std.testing.expectEqualStrings(".config/App.Main", dotted);
+}
+
+test "native separators are recognized by path helpers" {
+    try std.testing.expectEqualStrings("file.zig", fileName("src\\core\\file.zig"));
+    try std.testing.expectEqualStrings("src\\core", parentDir("src\\core\\file.zig").?);
+    try std.testing.expectEqual(@as(u32, 2), depth("src\\core\\file.zig"));
+    try std.testing.expect(isEntryPointPath("src\\bin\\tool.rs"));
+    try std.testing.expect(isPackageIndexPath("src\\parser\\mod.rs"));
 }
 
 // ── Tests ─────────────────────────────────────────────────────

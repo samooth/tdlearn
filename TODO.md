@@ -178,15 +178,15 @@ Prioridades:
 - [x] Deduplicar violaciones y hacer estable su orden.
 - [x] Añadir tests de patrones conflictivos, `**` y límites de segmentos.
 
-### [ ] CORE-001 — Normalizar rutas y definir portabilidad
+### [x] CORE-001 — Normalizar rutas y definir portabilidad
 
-- Referencias: `src/core/path_utils.zig:20-146`, `src/analysis/walker.zig:81`, `src/main.zig:317,409`.
+- Referencias: `src/core/path_utils.zig:5-190`, `src/analysis/walker.zig:49-120`, `src/analysis/resolver.zig:328-335`.
 - [x] Usar basename/extensión correctos.
-- [ ] Separar paths del filesystem de paths canónicos.
+- [x] Separar paths del filesystem de paths canónicos.
 - [x] Convertir a relativas las aristas y paths usados por rules.
-- [ ] Definir symlinks, junctions, dotfiles, case sensitivity, UNC y paths con puntos.
-- [ ] Implementar o corregir la convención de `mod.rs` y entry points.
-- [ ] Añadir tests de Linux, macOS, Windows, Unicode, traversal y separadores duplicados.
+- [x] Definir symlinks, junctions, dotfiles, case sensitivity, UNC y paths con puntos.
+- [x] Implementar o corregir la convención de `mod.rs` y entry points.
+- [x] Añadir tests portables de Unicode, traversal y separadores; la ejecución multi-OS queda en TEST-001.
 
 ### [ ] JSON-001 — Versionar y estabilizar la salida JSON
 

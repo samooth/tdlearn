@@ -51,38 +51,41 @@ pub const Walker = struct {
         var files: std.ArrayList(core.types.FileNode) = .empty;
         // Normalize root: "." or "./" → "" so paths come out as "src/main.zig", not "./src/main.zig"
         var root = self.root_path;
-        while (std.mem.startsWith(u8, root, "./")) root = root[2..];
+        while (std.mem.startsWith(u8, root, "./") or std.mem.startsWith(u8, root, ".\\")) root = root[2..];
         if (std.mem.eql(u8, root, ".")) root = "";
         try self.walkDir(if (root.len == 0) "." else root, &files);
 
-        normalizePaths(files.items, self.root_path);
+        try normalizePaths(self.allocator(), files.items, self.root_path);
         return try files.toOwnedSlice(self.allocator());
     }
 
-    fn normalizePaths(files: []core.types.FileNode, root: []const u8) void {
+    fn normalizePaths(alloc: Allocator, files: []core.types.FileNode, root: []const u8) !void {
         const normalized_root = normalizeRoot(root);
         for (files) |*node| {
-            node.path = relativePath(node.path, normalized_root);
-            if (node.children) |children| normalizePaths(children, normalized_root);
+            node.path = try core.path_utils.canonicalRelative(alloc, relativePath(node.path, normalized_root));
+            if (node.children) |children| try normalizePaths(alloc, children, normalized_root);
         }
     }
 
     fn normalizeRoot(root: []const u8) []const u8 {
         var result = root;
-        while (std.mem.startsWith(u8, result, "./")) result = result[2..];
+        while (std.mem.startsWith(u8, result, "./") or std.mem.startsWith(u8, result, ".\\")) result = result[2..];
         if (std.mem.eql(u8, result, ".")) return "";
-        while (result.len > 1 and result[result.len - 1] == '/') result = result[0 .. result.len - 1];
+        while (result.len > 1 and (result[result.len - 1] == '/' or result[result.len - 1] == '\\')) {
+            result = result[0 .. result.len - 1];
+        }
         return result;
     }
 
     fn relativePath(path: []const u8, root: []const u8) []const u8 {
         var result = path;
-        while (std.mem.startsWith(u8, result, "./")) result = result[2..];
+        while (std.mem.startsWith(u8, result, "./") or std.mem.startsWith(u8, result, ".\\")) result = result[2..];
         if (root.len == 0) return result;
-        if (std.mem.eql(u8, root, "/") and result.len > 1 and result[0] == '/') return result[1..];
+        if ((std.mem.eql(u8, root, "/") or std.mem.eql(u8, root, "\\")) and
+            result.len > 1 and (result[0] == '/' or result[0] == '\\')) return result[1..];
         if (result.len > root.len and
             std.mem.startsWith(u8, result, root) and
-            result[root.len] == '/')
+            (result[root.len] == '/' or result[root.len] == '\\'))
         {
             return result[root.len + 1 ..];
         }
@@ -107,6 +110,7 @@ pub const Walker = struct {
         std.sort.heap(WalkEntry, entries.items, {}, walkEntryLessThan);
 
         for (entries.items) |entry| {
+            if (entry.kind != .file and entry.kind != .directory) continue;
             if (entry.kind == .directory and lang_registry.LangRegistry.isExcludedDir(entry.name)) {
                 continue;
             }
@@ -287,6 +291,16 @@ test "normalizes paths relative to scan root" {
     try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("project/src/main.zig", "project"));
     try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("./src/main.zig", ""));
     try std.testing.expectEqualStrings("tmp/main.zig", Walker.relativePath("/tmp/main.zig", "/"));
+}
+
+test "normalizes filesystem paths to canonical relative paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var nodes = [_]core.types.FileNode{
+        .{ .path = "./src\\layout\\..\\main.zig", .name = "main.zig", .is_dir = false },
+    };
+    try Walker.normalizePaths(arena.allocator(), &nodes, "");
+    try std.testing.expectEqualStrings("src/main.zig", nodes[0].path);
 }
 
 test "walk entries sort by name" {

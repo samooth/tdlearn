@@ -326,14 +326,7 @@ fn stripExt(path: []const u8) []const u8 {
 }
 
 fn isPackageIndexFile(path: []const u8) bool {
-    const name = core.path_utils.fileName(path);
-    const index_names = [_][]const u8{
-        "mod.rs", "__init__.py", "index.js", "index.ts", "lib.rs", "mod.zig",
-    };
-    for (index_names) |n| {
-        if (std.mem.eql(u8, name, n)) return true;
-    }
-    return false;
+    return core.path_utils.isPackageIndexPath(path);
 }
 
 // ── Tests ─────────────────────────────────────────────────────
