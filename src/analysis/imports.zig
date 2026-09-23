@@ -18,12 +18,53 @@ pub const ImportExtractor = struct {
 
         var lines = std.mem.splitScalar(u8, contents, '\n');
         const lang_kind = langId(lang);
+        var in_block_comment = false;
+        var in_triple_quote: u8 = 0;
+        var in_template = false;
+        var in_go_import_block = false;
         while (lines.next()) |raw_line| {
             const line = std.mem.trim(u8, raw_line, " \t\r");
             if (line.len == 0) continue;
-            // Skip line comments (except C, where '#' is a preprocessor directive)
-            if (std.mem.startsWith(u8, line, "//")) continue;
+
+            if (in_block_comment) {
+                if (std.mem.indexOf(u8, line, "*/") != null) in_block_comment = false;
+                continue;
+            }
+            if (in_triple_quote != 0) {
+                if (containsDelimiter(line, in_triple_quote)) in_triple_quote = 0;
+                continue;
+            }
+            if (in_template) {
+                if (hasClosingBacktick(line)) in_template = false;
+                continue;
+            }
+            if (lang_kind != .python and hasUnclosedBlockComment(line)) {
+                in_block_comment = true;
+                continue;
+            }
+            if (lang_kind == .python and hasUnclosedTripleQuote(line, '"')) {
+                in_triple_quote = '"';
+                continue;
+            }
+            if (lang_kind == .python and hasUnclosedTripleQuote(line, '\'')) {
+                in_triple_quote = '\'';
+                continue;
+            }
+            if ((lang_kind == .javascript or lang_kind == .typescript) and hasUnclosedTemplate(line)) {
+                in_template = true;
+                continue;
+            }
+
             if (lang_kind != .c and lang_kind != .cpp and std.mem.startsWith(u8, line, "#")) continue;
+            if (lang_kind == .go) {
+                if (in_go_import_block and std.mem.eql(u8, line, ")")) in_go_import_block = false;
+                if (!in_go_import_block and std.mem.startsWith(u8, line, "import") and
+                    std.mem.indexOfScalar(u8, line, '(') != null)
+                {
+                    in_go_import_block = true;
+                }
+                if (!in_go_import_block and !std.mem.startsWith(u8, line, "import \"")) continue;
+            }
 
             if (lang_kind == .python) {
                 try extractPythonImports(allocator, &result, line);
@@ -50,6 +91,91 @@ pub const ImportExtractor = struct {
         return try result.toOwnedSlice(allocator);
     }
 
+    fn containsDelimiter(line: []const u8, delimiter: u8) bool {
+        const text: []const u8 = if (delimiter == '"') "\"\"\"" else "'''";
+        return std.mem.indexOf(u8, line, text) != null;
+    }
+
+    fn hasUnclosedTripleQuote(line: []const u8, delimiter: u8) bool {
+        const text: []const u8 = if (delimiter == '"') "\"\"\"" else "'''";
+        const first = std.mem.indexOf(u8, line, text) orelse return false;
+        return std.mem.indexOfPos(u8, line, first + text.len, text) == null;
+    }
+
+    fn hasUnclosedBlockComment(line: []const u8) bool {
+        var quote: u8 = 0;
+        var escaped = false;
+        var index: usize = 0;
+        while (index < line.len) {
+            const character = line[index];
+            if (quote != 0) {
+                if (character == quote and !escaped) quote = 0;
+                escaped = character == '\\' and !escaped;
+                if (character != '\\') escaped = false;
+                index += 1;
+                continue;
+            }
+            if (character == '"' or character == '\'' or character == '`') {
+                quote = character;
+                index += 1;
+                continue;
+            }
+            if (std.mem.startsWith(u8, line[index..], "/*")) {
+                return std.mem.indexOfPos(u8, line, index + 2, "*/") == null;
+            }
+            if (std.mem.startsWith(u8, line[index..], "//")) return false;
+            index += 1;
+        }
+        return false;
+    }
+
+    fn hasUnclosedTemplate(line: []const u8) bool {
+        var open = false;
+        var escaped = false;
+        for (line) |character| {
+            if (character == '`' and !escaped) open = !open;
+            escaped = character == '\\' and !escaped;
+            if (character != '\\') escaped = false;
+        }
+        return open;
+    }
+
+    fn hasClosingBacktick(line: []const u8) bool {
+        var escaped = false;
+        for (line) |character| {
+            if (character == '`' and !escaped) return true;
+            escaped = character == '\\' and !escaped;
+            if (character != '\\') escaped = false;
+        }
+        return false;
+    }
+
+    fn findCodeMarker(line: []const u8, marker: []const u8) ?usize {
+        var quote: u8 = 0;
+        var escaped = false;
+        var index: usize = 0;
+        while (index < line.len) {
+            const character = line[index];
+            if (quote != 0) {
+                if (character == quote and !escaped) quote = 0;
+                escaped = character == '\\' and !escaped;
+                if (character != '\\') escaped = false;
+                index += 1;
+                continue;
+            }
+            if (character == '/' and index + 1 < line.len and line[index + 1] == '/') return null;
+            if (character == '/' and index + 1 < line.len and line[index + 1] == '*') return null;
+            if (character == '"' or character == '\'' or character == '`') {
+                quote = character;
+                index += 1;
+                continue;
+            }
+            if (std.mem.startsWith(u8, line[index..], marker)) return index;
+            index += 1;
+        }
+        return null;
+    }
+
     fn contains(items: []const []const u8, target: []const u8) bool {
         for (items) |item| {
             if (std.mem.eql(u8, item, target)) return true;
@@ -60,7 +186,7 @@ pub const ImportExtractor = struct {
     // ── Zig: @import("module") ──
     fn extractZig(line: []const u8) ?[]const u8 {
         const marker = "@import(\"";
-        const start = std.mem.indexOf(u8, line, marker) orelse return null;
+        const start = findCodeMarker(line, marker) orelse return null;
         const str_start = start + marker.len;
         const end = std.mem.indexOfPos(u8, line, str_start, "\"") orelse return null;
         return line[str_start..end];
@@ -156,7 +282,7 @@ pub const ImportExtractor = struct {
     }
 
     fn extractQuoted(line: []const u8, marker: []const u8) ?[]const u8 {
-        const marker_start = std.mem.indexOf(u8, line, marker) orelse return null;
+        const marker_start = findCodeMarker(line, marker) orelse return null;
         const quote_start = marker_start + marker.len;
         if (quote_start >= line.len) return null;
         const quote = line[quote_start];
@@ -225,6 +351,7 @@ test "zig imports" {
         \\const core = @import("core");
         \\const metrics = @import("metrics/mod.zig");
         \\// comment @import("nope")
+        \\const text = "@import(\"fake\")";
         \\fn main() void {}
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "zig");
@@ -258,20 +385,23 @@ test "rust use and mod" {
 test "python imports" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const src =
-        \\import os, sys
-        \\import numpy as np
-        \\from mypkg.sub import helper
-        \\from .relative import thing
-        \\# import nope
-    ;
+    const src = "import os, sys\n" ++
+        "import numpy as np\n" ++
+        "from mypkg.sub import helper\n" ++
+        "from .relative import thing\n" ++
+        "text = \"\"\"\n" ++
+        "import fake\n" ++
+        "\"\"\"\n" ++
+        "import real2\n" ++
+        "# import nope\n";
     const imports = try ImportExtractor.extract(arena.allocator(), src, "python");
-    try std.testing.expectEqual(@as(usize, 5), imports.len);
+    try std.testing.expectEqual(@as(usize, 6), imports.len);
     try std.testing.expectEqualStrings("os", imports[0]);
     try std.testing.expectEqualStrings("sys", imports[1]);
     try std.testing.expectEqualStrings("numpy", imports[2]);
     try std.testing.expectEqualStrings("mypkg.sub", imports[3]);
     try std.testing.expectEqualStrings(".relative", imports[4]);
+    try std.testing.expectEqualStrings("real2", imports[5]);
 }
 
 test "js imports" {
@@ -284,6 +414,7 @@ test "js imports" {
         \\const z = require("mod-c");
         \\import single from 'mod-single';
         \\const dynamic = import('mod-dynamic');
+        \\const text = "import fake from 'not-a-module'";
         \\import {
         \\    first,
         \\    second,
@@ -309,7 +440,7 @@ test "go imports" {
         \\    "os"
         \\    alias "example.com/pkg"
         \\)
-        \\func main() {}
+        \\func main() { const text = "not-an-import"; }
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "go");
     try std.testing.expectEqual(@as(usize, 3), imports.len);
@@ -326,6 +457,9 @@ test "c includes" {
         \\#include "local.h"
         \\  #include "indented.h"
         \\#include "dir/other.h"
+        \\/*
+        \\#include "fake.h"
+        \\*/
     ;
     const imports = try ImportExtractor.extract(arena.allocator(), src, "c");
     try std.testing.expectEqual(@as(usize, 3), imports.len);
