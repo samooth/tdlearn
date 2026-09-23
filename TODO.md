@@ -111,7 +111,7 @@ Prioridades:
 - [x] Evitar que sufijos ambiguos se resuelvan al primer archivo según el orden del filesystem.
 - [x] Aumentar el buffer para paths largos y probar paths anidados.
 - [ ] Probar Unicode, separadores nativos y traversal.
-- [ ] Hacer el resultado independiente del orden de recorrido.
+- [x] Hacer el resultado independiente del orden de recorrido.
 
 ### [ ] ANALYSIS-005 — Completar funciones, clases y herencia
 

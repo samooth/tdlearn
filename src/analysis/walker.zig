@@ -4,6 +4,15 @@ const Io = std.Io;
 const core = @import("core");
 const lang_registry = @import("lang_registry.zig");
 
+const WalkEntry = struct {
+    name: []const u8,
+    kind: std.Io.File.Kind,
+};
+
+fn walkEntryLessThan(_: void, left: WalkEntry, right: WalkEntry) bool {
+    return std.mem.lessThan(u8, left.name, right.name);
+}
+
 /// File system walker that builds a FileNode tree.
 ///
 /// Usage:
@@ -86,9 +95,18 @@ pub const Walker = struct {
         });
         defer dir.close(self.io);
 
+        var entries = std.ArrayList(WalkEntry).empty;
+        defer entries.deinit(self.allocator());
         var iter = dir.iterate();
         while (try iter.next(self.io)) |entry| {
-            // Skip excluded directories
+            try entries.append(self.allocator(), .{
+                .name = try self.allocator().dupe(u8, entry.name),
+                .kind = entry.kind,
+            });
+        }
+        std.sort.heap(WalkEntry, entries.items, {}, walkEntryLessThan);
+
+        for (entries.items) |entry| {
             if (entry.kind == .directory and lang_registry.LangRegistry.isExcludedDir(entry.name)) {
                 continue;
             }
@@ -97,7 +115,7 @@ pub const Walker = struct {
             defer self.allocator().free(full_path);
 
             const path_copy = try self.allocator().dupe(u8, full_path);
-            const name_copy = try self.allocator().dupe(u8, entry.name);
+            const name_copy = entry.name;
 
             if (entry.kind == .directory) {
                 // Recurse into subdirectory
@@ -269,6 +287,18 @@ test "normalizes paths relative to scan root" {
     try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("project/src/main.zig", "project"));
     try std.testing.expectEqualStrings("src/main.zig", Walker.relativePath("./src/main.zig", ""));
     try std.testing.expectEqualStrings("tmp/main.zig", Walker.relativePath("/tmp/main.zig", "/"));
+}
+
+test "walk entries sort by name" {
+    var entries = [_]WalkEntry{
+        .{ .name = "z.zig", .kind = .file },
+        .{ .name = "a.zig", .kind = .file },
+        .{ .name = "m.zig", .kind = .file },
+    };
+    std.sort.heap(WalkEntry, &entries, {}, walkEntryLessThan);
+    try std.testing.expectEqualStrings("a.zig", entries[0].name);
+    try std.testing.expectEqualStrings("m.zig", entries[1].name);
+    try std.testing.expectEqualStrings("z.zig", entries[2].name);
 }
 
 test "isCommentLine" {
