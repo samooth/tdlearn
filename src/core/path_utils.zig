@@ -39,7 +39,7 @@ pub fn isSameModule(path_a: []const u8, path_b: []const u8) bool {
 /// Strip file extension, returning the stem.
 /// Ensures the dot is after the last '/' to avoid stripping directory dots.
 pub fn stripExtension(path: []const u8) []const u8 {
-    const last_sep = if (indexOf(path, '/')) |i| i + 1 else 0;
+    const last_sep = if (lastIndexOf(path, '/')) |i| i + 1 else 0;
     const stem = path[last_sep..];
     if (lastIndexOf(stem, '.')) |dot| {
         return path[0 .. last_sep + dot];
@@ -49,7 +49,7 @@ pub fn stripExtension(path: []const u8) []const u8 {
 
 /// Get file extension (without the dot), or empty string if none.
 pub fn extension(path: []const u8) []const u8 {
-    const last_sep = if (indexOf(path, '/')) |i| i + 1 else 0;
+    const last_sep = if (lastIndexOf(path, '/')) |i| i + 1 else 0;
     const stem = path[last_sep..];
     if (lastIndexOf(stem, '.')) |dot| {
         return stem[dot + 1 ..];
@@ -133,11 +133,7 @@ fn moduleOfDeep(path: []const u8, depth2_end: usize) []const u8 {
 fn moduleOfSingleDir(path: []const u8, first_sep: usize) []const u8 {
     const parent = path[0..first_sep];
     if (isDominantDir(parent)) {
-        // "src/main.zig" → "src/main"
-        if (lastIndexOf(path, '.')) |dot| {
-            if (dot > first_sep) return path[0..dot];
-        }
-        return path;
+        return stripExtension(path);
     }
     return parent;
 }
@@ -208,12 +204,16 @@ test "strip_extension" {
     try std.testing.expectEqualStrings("src/main", stripExtension("src/main.zig"));
     try std.testing.expectEqualStrings("foo.bar", stripExtension("foo.bar.baz"));
     try std.testing.expectEqualStrings("noext", stripExtension("noext"));
+    try std.testing.expectEqualStrings("src/v1.0/main", stripExtension("src/v1.0/main.zig"));
+    try std.testing.expectEqualStrings("src/v1.0/main", stripExtension("src/v1.0/main"));
 }
 
 test "extension" {
     try std.testing.expectEqualStrings("zig", extension("main.zig"));
     try std.testing.expectEqualStrings("toml", extension("config.toml"));
     try std.testing.expectEqualStrings("", extension("Makefile"));
+    try std.testing.expectEqualStrings("zig", extension("src/v1.0/main.zig"));
+    try std.testing.expectEqualStrings("", extension("src/v1.0/Makefile"));
 }
 
 test "file_name" {

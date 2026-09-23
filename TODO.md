@@ -179,7 +179,8 @@ Prioridades:
 ### [ ] CORE-001 — Normalizar rutas y definir portabilidad
 
 - Referencias: `src/core/path_utils.zig:20-146`, `src/analysis/walker.zig:81`, `src/main.zig:317,409`.
-- [ ] Usar basename/extensión correctos y separar paths del filesystem de paths canónicos.
+- [x] Usar basename/extensión correctos.
+- [ ] Separar paths del filesystem de paths canónicos.
 - [ ] Convertir a relativas las aristas y paths usados por rules.
 - [ ] Definir symlinks, junctions, dotfiles, case sensitivity, UNC y paths con puntos.
 - [ ] Implementar o corregir la convención de `mod.rs` y entry points.
