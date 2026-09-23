@@ -78,21 +78,18 @@ pub fn computeHealth(
     // 3. Depth from entry points
     // Prefer conventional entry files (main.*, index.*, build.zig, ...);
     // fall back to files with no incoming import edges.
-    var entry_points_buf: [32]usize = undefined;
-    var ep_count: usize = 0;
+    var entry_points = std.ArrayList(usize).empty;
+    defer entry_points.deinit(allocator);
     {
         // Pass 1: conventional entry-point paths
         for (file_paths.items, 0..) |path, i| {
             if (core.path_utils.isEntryPointPath(path)) {
-                if (ep_count < entry_points_buf.len) {
-                    entry_points_buf[ep_count] = i;
-                    ep_count += 1;
-                }
+                try entry_points.append(allocator, i);
             }
         }
 
         // Pass 2 (fallback): no incoming edges
-        if (ep_count == 0 and import_edges.len > 0) {
+        if (entry_points.items.len == 0 and import_edges.len > 0) {
             const incoming = try allocator.alloc(bool, file_paths.items.len);
             defer allocator.free(incoming);
             @memset(incoming, false);
@@ -102,25 +99,20 @@ pub fn computeHealth(
                 }
             }
             for (incoming, 0..) |has_incoming, i| {
-                if (!has_incoming and ep_count < entry_points_buf.len) {
-                    entry_points_buf[ep_count] = i;
-                    ep_count += 1;
-                }
+                if (!has_incoming) try entry_points.append(allocator, i);
             }
         }
 
         // Pass 3 (last resort): first file
-        if (ep_count == 0 and file_paths.items.len > 0) {
-            entry_points_buf[0] = 0;
-            ep_count = 1;
+        if (entry_points.items.len == 0 and file_paths.items.len > 0) {
+            try entry_points.append(allocator, 0);
         }
     }
-    const entry_points: []const usize = entry_points_buf[0..ep_count];
 
     const max_depth = try depth.computeMaxDepth(
         allocator,
         file_paths.items.len,
-        entry_points,
+        entry_points.items,
         tarjan_edges.items,
     );
 
@@ -264,4 +256,36 @@ test "compute_health depth from conventional entry" {
     );
     // main → lib → util = max depth 2 from the conventional entry
     try std.testing.expectEqual(@as(u32, 2), report.root_cause_raw.max_depth);
+}
+
+test "compute_health supports more than 32 entry points" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const entry_count = 40;
+    const files = try allocator.alloc(core.types.FileNode, entry_count + 1);
+    const paths = try allocator.alloc([]const u8, entry_count + 1);
+
+    for (0..entry_count) |i| {
+        paths[i] = try std.fmt.allocPrint(allocator, "src/entry{d}/main.zig", .{i});
+        files[i] = .{
+            .path = paths[i],
+            .name = "main.zig",
+            .is_dir = false,
+            .lines = 10,
+        };
+    }
+    paths[entry_count] = "src/target.zig";
+    files[entry_count] = .{
+        .path = paths[entry_count],
+        .name = "target.zig",
+        .is_dir = false,
+        .lines = 10,
+    };
+
+    const edges = [_]core.types.ImportEdge{
+        .{ .from_file = paths[entry_count - 1], .to_file = paths[entry_count] },
+    };
+    const report = try computeHealth(allocator, files, &edges, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 1), report.root_cause_raw.max_depth);
 }

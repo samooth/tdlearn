@@ -129,12 +129,12 @@ Prioridades:
 - [ ] Dejar las llamadas no resolubles como ambiguas, no como aristas inventadas.
 - [ ] Cubrir funciones privadas, nombres duplicados, comentarios y strings con tests negativos.
 
-### [ ] METRIC-001 — Definir y corregir la profundidad
+### [x] METRIC-001 — Definir y corregir la profundidad
 
 - Referencias: `src/metrics/depth.zig:5-70`, `src/metrics/mod.zig:78-125`.
 - [x] Decidir si la métrica representa camino más largo o distancia mínima.
 - [x] Hacer explícita la política para ciclos, nodos inalcanzables y componentes desconectados.
-- [ ] Eliminar el límite fijo de 32 entry points o documentarlo y probarlo.
+- [x] Eliminar el límite fijo de 32 entry points o documentarlo y probarlo.
 - [x] Añadir tests con rutas de distinta longitud, saltos, ciclos, raíces múltiples y archivos sin entry point.
 
 ### [ ] METRIC-002 — Alinear Equality con la complejidad declarada
