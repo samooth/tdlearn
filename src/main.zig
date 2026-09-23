@@ -404,7 +404,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     for (file_paths) |fpath| {
         const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
         const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
-        if (contents.len > settings.max_parse_size_kb * 1024) return error.FileTooLarge;
+        if (@as(u64, settings.max_parse_size_kb) * 1024 < contents.len) return error.FileTooLarge;
         try source_contents.append(arena, contents);
         try contents_by_path.put(fpath, contents);
     }

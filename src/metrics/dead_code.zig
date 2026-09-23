@@ -174,7 +174,7 @@ pub fn analyze(
         }
     }
 
-    const total: u32 = @intCast(records.items.len);
+    const total = std.math.cast(u32, records.items.len) orelse return error.IntegerOverflow;
     var redundant: u32 = 0;
     for (dead_flags, duplicate_flags) |is_dead, is_duplicate| {
         if (is_dead or is_duplicate) redundant += 1;

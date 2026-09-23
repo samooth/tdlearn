@@ -40,9 +40,9 @@ pub fn computeHealth(
     try collectLineCounts(allocator, files, &file_lines);
 
     // Count total lines
-    var total_lines: u32 = 0;
-    for (file_lines.items) |l| {
-        total_lines += l;
+    var total_lines: u64 = 0;
+    for (file_lines.items) |line_count| {
+        total_lines += @as(u64, line_count);
     }
 
     // 1. Modularity Q (all three edge types)
@@ -176,9 +176,9 @@ pub fn computeHealth(
         .quality_signal_int = @intFromFloat(quality_signal * 10000.0),
         .root_cause_raw = raw,
         .root_cause_scores = scores,
-        .file_count = @intCast(file_paths.items.len),
-        .line_count = total_lines,
-        .edge_count = @intCast(import_edges.len + call_edges.len + inherit_edges.len),
+        .file_count = std.math.cast(u32, file_paths.items.len) orelse return error.IntegerOverflow,
+        .line_count = std.math.cast(u32, total_lines) orelse return error.IntegerOverflow,
+        .edge_count = std.math.cast(u32, import_edges.len + call_edges.len + inherit_edges.len) orelse return error.IntegerOverflow,
         .bottleneck = bottleneck,
         .total_functions = total_funcs,
         .dead_functions = dead_funcs,

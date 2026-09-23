@@ -243,7 +243,7 @@ Prioridades:
 - [x] Indexar cada archivo una sola vez y evitar releerlo.
 - [x] Reemplazar deduplicación O(E²) por sets hash.
 - [ ] Eliminar límites arbitrarios de entry points, statements y tamaños, o hacerlos configurables y seguros.
-- [ ] Proteger índices y conteos contra overflow y entradas inválidas.
+- [x] Proteger índices y conteos contra overflow y entradas inválidas.
 
 ### [ ] CLEANUP-001 — Conectar o retirar APIs incompletas
 
