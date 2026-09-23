@@ -396,7 +396,25 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     const all_file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
     const file_paths = try filterSourcePaths(arena, all_file_paths);
-    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRoot(arena, io, path, all_file_paths);
+
+    var source_contents = std.ArrayList([]const u8).empty;
+    defer source_contents.deinit(arena);
+    var contents_by_path = std.StringHashMap([]const u8).init(arena);
+    defer contents_by_path.deinit();
+    for (file_paths) |fpath| {
+        const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
+        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
+        if (contents.len > settings.max_parse_size_kb * 1024) return error.FileTooLarge;
+        try source_contents.append(arena, contents);
+        try contents_by_path.put(fpath, contents);
+    }
+    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRootWithContents(
+        arena,
+        io,
+        path,
+        all_file_paths,
+        contents_by_path,
+    );
 
     var source_files = std.ArrayList(core.types.FileNode).empty;
     defer source_files.deinit(arena);
@@ -410,11 +428,8 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
     var max_file_lines: u32 = 0;
     var max_fn_lines: u32 = 0;
-    for (file_paths) |fpath| {
+    for (file_paths, source_contents.items) |fpath, contents| {
         const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
-        const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
-        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
-        if (contents.len > settings.max_parse_size_kb * 1024) return error.FileTooLarge;
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
         try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
 

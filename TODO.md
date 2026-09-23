@@ -240,7 +240,7 @@ Prioridades:
 ### [ ] PERF-001 — Eliminar límites y cuellos de botella
 
 - Referencias: `src/metrics/mod.zig:157-189`, `src/analysis/call_graph.zig:157-167`, `src/analysis/walker.zig:182-249`.
-- [ ] Indexar cada archivo una sola vez y evitar releerlo.
+- [x] Indexar cada archivo una sola vez y evitar releerlo.
 - [ ] Reemplazar deduplicación O(E²) por sets hash.
 - [ ] Eliminar límites arbitrarios de entry points, statements y tamaños, o hacerlos configurables y seguros.
 - [ ] Proteger índices y conteos contra overflow y entradas inválidas.

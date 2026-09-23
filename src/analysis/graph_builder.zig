@@ -28,6 +28,16 @@ pub const GraphBuilder = struct {
         root_path: []const u8,
         file_paths: []const []const u8,
     ) ![]core.types.ImportEdge {
+        return buildImportEdgesAtRootWithContents(allocator, io, root_path, file_paths, null);
+    }
+
+    pub fn buildImportEdgesAtRootWithContents(
+        allocator: Allocator,
+        io: Io,
+        root_path: []const u8,
+        file_paths: []const []const u8,
+        contents_by_path: ?std.StringHashMap([]const u8),
+    ) ![]core.types.ImportEdge {
         var edges = std.ArrayList(core.types.ImportEdge).empty;
         errdefer edges.deinit(allocator);
 
@@ -45,7 +55,10 @@ pub const GraphBuilder = struct {
 
         for (source_paths.items) |path| {
             const lang = detectLangFor(path);
-            const contents = try readFile(allocator, io, root_path, path);
+            const contents = if (contents_by_path) |contents_map|
+                contents_map.get(path) orelse return error.FileNotFound
+            else
+                try readFile(allocator, io, root_path, path);
             const raw_imports = try imports_mod.ImportExtractor.extract(allocator, contents, lang);
 
             for (raw_imports) |raw| {
