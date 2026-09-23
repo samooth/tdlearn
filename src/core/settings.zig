@@ -88,19 +88,36 @@ pub const Settings = struct {
     quality_critical: u32 = 4000,
 
     // ── Sanitization ──
-    /// Validate settings to prevent division-by-zero and invalid ranges.
+    pub fn validate(self: *const Settings) !void {
+        if (self.max_cc == 0 or self.max_fn_lines == 0 or self.max_file_size_kb == 0 or
+            self.max_parse_size_kb == 0 or self.max_call_targets == 0) return error.InvalidSettings;
+        if (!std.math.isFinite(self.treemap_min_rect) or self.treemap_min_rect <= 0.0 or
+            !std.math.isFinite(self.zoom_min) or self.zoom_min <= 0.0 or
+            !std.math.isFinite(self.zoom_max) or self.zoom_max <= self.zoom_min or
+            !std.math.isFinite(self.heat_half_life) or self.heat_half_life <= 0.0 or
+            !std.math.isFinite(self.font_scale) or self.font_scale <= 0.0 or
+            !std.math.isFinite(self.ui_scale) or self.ui_scale <= 0.0) return error.InvalidSettings;
+        if (self.quality_critical > self.quality_degraded or self.quality_degraded > self.quality_healthy) {
+            return error.InvalidSettings;
+        }
+    }
+
+    /// Clamp common invalid values into a usable configuration.
     pub fn sanitize(self: *Settings) void {
         if (self.max_cc == 0) self.max_cc = 1;
         if (self.max_fn_lines == 0) self.max_fn_lines = 1;
         if (self.max_file_size_kb == 0) self.max_file_size_kb = 1;
         if (self.max_parse_size_kb == 0) self.max_parse_size_kb = 1;
         if (self.max_call_targets == 0) self.max_call_targets = 1;
-        if (self.treemap_min_rect < 0.1) self.treemap_min_rect = 0.1;
-        if (self.zoom_min <= 0.0) self.zoom_min = 0.01;
-        if (self.zoom_max <= self.zoom_min) self.zoom_max = self.zoom_min * 100.0;
-        if (self.heat_half_life <= 0.0) self.heat_half_life = 1.0;
-        if (self.font_scale <= 0.0) self.font_scale = 0.05;
-        if (self.ui_scale <= 0.0) self.ui_scale = 0.5;
+        if (!std.math.isFinite(self.treemap_min_rect) or self.treemap_min_rect < 0.1) self.treemap_min_rect = 0.1;
+        if (!std.math.isFinite(self.zoom_min) or self.zoom_min <= 0.0) self.zoom_min = 0.01;
+        if (!std.math.isFinite(self.zoom_max) or self.zoom_max <= self.zoom_min) self.zoom_max = self.zoom_min * 100.0;
+        if (!std.math.isFinite(self.heat_half_life) or self.heat_half_life <= 0.0) self.heat_half_life = 1.0;
+        if (!std.math.isFinite(self.font_scale) or self.font_scale <= 0.0) self.font_scale = 0.05;
+        if (!std.math.isFinite(self.ui_scale) or self.ui_scale <= 0.0) self.ui_scale = 0.5;
+        if (self.quality_degraded > self.quality_healthy) self.quality_degraded = self.quality_healthy;
+        if (self.quality_critical > self.quality_degraded) self.quality_critical = self.quality_degraded;
+        _ = self.validate() catch {};
     }
 };
 
@@ -202,6 +219,18 @@ test "Settings sanitize prevents zero values" {
     try std.testing.expect(s.heat_half_life > 0.0);
     try std.testing.expect(s.font_scale > 0.0);
     try std.testing.expect(s.ui_scale > 0.0);
+}
+
+test "Settings validate rejects non-finite values" {
+    var s = Settings{};
+    s.zoom_min = std.math.nan(f64);
+    try std.testing.expectError(error.InvalidSettings, s.validate());
+    s = Settings{};
+    s.quality_critical = 7000;
+    s.quality_degraded = 6000;
+    try std.testing.expectError(error.InvalidSettings, s.validate());
+    s.sanitize();
+    try s.validate();
 }
 
 test "CouplingGrade label" {

@@ -53,6 +53,7 @@ pub const Snapshot = struct {
 
         for (files) |*file| {
             if (!file.is_dir) {
+                if (file_index.contains(file.path)) return error.DuplicateNode;
                 try file_index.put(file.path, .{
                     .lines = file.lines,
                     .logic = file.logic,
@@ -90,25 +91,25 @@ pub const Snapshot = struct {
     }
 
     /// Get all files that import from a given file (fan-in).
-    pub fn fanIn(self: *const Snapshot, path: []const u8) []const types.ImportEdge {
-        var result: []const types.ImportEdge = &.{};
+    /// The returned slice is owned by `allocator`.
+    pub fn fanIn(self: *const Snapshot, allocator: Allocator, path: []const u8) ![]const types.ImportEdge {
+        var result = std.ArrayList(types.ImportEdge).empty;
+        errdefer result.deinit(allocator);
         for (self.import_edges) |edge| {
-            if (std.mem.eql(u8, edge.to_file, path)) {
-                result = result ++ &[_]types.ImportEdge{edge};
-            }
+            if (std.mem.eql(u8, edge.to_file, path)) try result.append(allocator, edge);
         }
-        return result;
+        return try result.toOwnedSlice(allocator);
     }
 
     /// Get all files that a given file imports (fan-out).
-    pub fn fanOut(self: *const Snapshot, path: []const u8) []const types.ImportEdge {
-        var result: []const types.ImportEdge = &.{};
+    /// The returned slice is owned by `allocator`.
+    pub fn fanOut(self: *const Snapshot, allocator: Allocator, path: []const u8) ![]const types.ImportEdge {
+        var result = std.ArrayList(types.ImportEdge).empty;
+        errdefer result.deinit(allocator);
         for (self.import_edges) |edge| {
-            if (std.mem.eql(u8, edge.from_file, path)) {
-                result = result ++ &[_]types.ImportEdge{edge};
-            }
+            if (std.mem.eql(u8, edge.from_file, path)) try result.append(allocator, edge);
         }
-        return result;
+        return try result.toOwnedSlice(allocator);
     }
 
     /// Get the number of files in the snapshot.
@@ -186,4 +187,28 @@ test "Snapshot with import edges" {
 
     try std.testing.expectEqual(@as(u32, 1), snap.importEdgeCount());
     try std.testing.expectEqualStrings("src/lib.zig", snap.import_edges[0].to_file);
+    const fan_in = try snap.fanIn(allocator, "src/lib.zig");
+    defer allocator.free(fan_in);
+    try std.testing.expectEqual(@as(usize, 1), fan_in.len);
+    const fan_out = try snap.fanOut(allocator, "src/main.zig");
+    defer allocator.free(fan_out);
+    try std.testing.expectEqual(@as(usize, 1), fan_out.len);
+}
+
+test "Snapshot rejects duplicate file paths" {
+    const allocator = std.testing.allocator;
+    var files = [_]types.FileNode{
+        .{ .path = "src/main.zig", .name = "main.zig", .is_dir = false },
+        .{ .path = "src/main.zig", .name = "main.zig", .is_dir = false },
+    };
+    try std.testing.expectError(error.DuplicateNode, Snapshot.init(
+        allocator,
+        std.testing.io,
+        ".",
+        files[0..],
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+    ));
 }

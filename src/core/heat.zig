@@ -38,6 +38,7 @@ pub const HeatTracker = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, half_life: f64) !HeatTracker {
+        if (!std.math.isFinite(half_life) or half_life <= 0.0) return error.InvalidHalfLife;
         return .{
             .entries = std.StringHashMap(HeatEntry).init(allocator),
             .trail = std.ArrayList(TrailEntry).empty,
@@ -141,6 +142,11 @@ test "HeatTracker basic record and get" {
     const value = heat.get("src/main.zig");
     try std.testing.expect(value > 0.0);
     try std.testing.expect(value <= HeatTracker.MAX_HEAT);
+}
+
+test "HeatTracker rejects invalid half-life" {
+    try std.testing.expectError(error.InvalidHalfLife, HeatTracker.init(std.testing.allocator, std.testing.io, 0.0));
+    try std.testing.expectError(error.InvalidHalfLife, HeatTracker.init(std.testing.allocator, std.testing.io, std.math.nan(f64)));
 }
 
 test "HeatTracker capped at MAX_HEAT" {
