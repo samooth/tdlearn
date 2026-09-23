@@ -72,6 +72,13 @@ pub fn analyze(
     var local_calls = std.ArrayList(LocalCall).empty;
     defer local_calls.deinit(allocator);
 
+    var referenced_names = std.StringHashMap(void).init(allocator);
+    defer {
+        var referenced_iter = referenced_names.iterator();
+        while (referenced_iter.next()) |entry| allocator.free(entry.key_ptr.*);
+        referenced_names.deinit();
+    }
+
     for (file_funcs) |ff| {
         const record_start = records.items.len;
         for (ff.funcs) |func| {
@@ -82,6 +89,7 @@ pub fn analyze(
         }
         if (!isTestPath(ff.file)) {
             try collectLocalCalls(allocator, ff, record_start, &local_calls);
+            try collectSymbolReferences(allocator, ff, &referenced_names);
         }
     }
 
@@ -91,7 +99,7 @@ pub fn analyze(
 
     for (records.items, 0..) |record, id| {
         if (isTestPath(record.file)) continue;
-        if (record.func.is_public or isRootFunction(record)) reachable[id] = true;
+        if (record.func.is_public or isRootFunction(record) or referenced_names.contains(record.func.name)) reachable[id] = true;
     }
 
     var changed = true;
@@ -570,6 +578,41 @@ fn appendSeparator(allocator: Allocator, output: *std.ArrayList(u8)) !void {
     try output.append(allocator, ' ');
 }
 
+fn collectSymbolReferences(
+    allocator: Allocator,
+    ff: FileFuncs,
+    names: *std.StringHashMap(void),
+) !void {
+    var state = ScanState{};
+    const python = isPythonFile(ff.file);
+    var line_no: u32 = 0;
+    var lines = std.mem.splitScalar(u8, ff.contents, '\n');
+    while (lines.next()) |line| {
+        line_no += 1;
+        if (isDeclarationLine(ff.funcs, line_no)) continue;
+        var code = std.ArrayList(u8).empty;
+        defer code.deinit(allocator);
+        normalizeLine(allocator, &code, line, python, &state) catch continue;
+        var index: usize = 0;
+        while (index < code.items.len) {
+            if (!isIdentChar(code.items[index])) {
+                index += 1;
+                continue;
+            }
+            const start = index;
+            while (index < code.items.len and isIdentChar(code.items[index])) index += 1;
+            const name = code.items[start..index];
+            var lookahead = index;
+            while (lookahead < code.items.len and std.ascii.isWhitespace(code.items[lookahead])) lookahead += 1;
+            if (lookahead < code.items.len and code.items[lookahead] == '(') continue;
+            if (names.contains(name)) continue;
+            const owned = try allocator.dupe(u8, name);
+            errdefer allocator.free(owned);
+            try names.put(owned, {});
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────
 
 fn makeFunc(name: []const u8, start: u32, end: u32, is_public: bool) core.types.FuncInfo {
@@ -631,6 +674,29 @@ test "uncalled private function is dead" {
     const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
     try std.testing.expectEqual(@as(f64, 1.0 / 3.0), result.dead_code_ratio);
+    try std.testing.expectEqualStrings("src/lib.zig", result.dead_files[0]);
+}
+
+test "function references used as callbacks are alive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents =
+        \\pub fn api() void {
+        \\    register(callback);
+        \\}
+        \\fn callback() void {}
+        \\fn orphan() void {}
+    ;
+    const funcs = [_]core.types.FuncInfo{
+        makeFunc("api", 1, 3, true),
+        makeFunc("callback", 4, 4, false),
+        makeFunc("orphan", 5, 5, false),
+    };
+    const ff = [_]FileFuncs{
+        .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
     try std.testing.expectEqualStrings("src/lib.zig", result.dead_files[0]);
 }
 
