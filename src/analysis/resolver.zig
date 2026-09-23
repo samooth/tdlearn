@@ -133,12 +133,12 @@ pub const Resolver = struct {
         // 2.5 Package alias: first path segment names a known package
         // ("tdlearn_core/analysis" → "tdlearn-core/src/lib.rs" dir + analysis)
         if (self.expandAlias(sa, normalized)) |expanded| {
-            if (self.matchWithExtensions(expanded)) |path| return path;
+            if (self.matchWithExtensions(sa, expanded)) |path| return path;
             if (self.matchSuffixChain(expanded)) |path| return path;
         }
 
         // 3. Exact / extension match, then suffix match on the raw module path
-        if (self.matchWithExtensions(normalized)) |path| return path;
+        if (self.matchWithExtensions(sa, normalized)) |path| return path;
         if (self.matchSuffixChain(normalized)) |path| return path;
 
         // 4. Dotted module paths (Python "mypkg.sub"): '.' → '/'
@@ -147,7 +147,7 @@ pub const Resolver = struct {
             for (buf) |*c| {
                 if (c.* == '.') c.* = '/';
             }
-            if (self.matchWithExtensions(buf)) |path| return path;
+            if (self.matchWithExtensions(sa, buf)) |path| return path;
             if (self.matchSuffixChain(buf)) |path| return path;
         }
 
@@ -156,7 +156,7 @@ pub const Resolver = struct {
         if (core.path_utils.parentDir(from_file)) |from_dir| {
             if (from_dir.len > 0) {
                 const joined = std.mem.join(sa, "/", &.{ from_dir, normalized }) catch return null;
-                if (self.matchWithExtensions(joined)) |path| return path;
+                if (self.matchWithExtensions(sa, joined)) |path| return path;
                 // Relative to parent dir + ../: deeper-package lookups
                 if (self.matchSuffixChain(joined)) |path| return path;
             }
@@ -252,7 +252,7 @@ pub const Resolver = struct {
 
         const joined = std.mem.join(sa, "/", parts.items) catch return null;
 
-        if (self.matchWithExtensions(joined)) |path| return path;
+        if (self.matchWithExtensions(sa, joined)) |path| return path;
         if (self.matchSuffixChain(joined)) |path| return path;
         if (self.indexedPath(joined)) |resolved| return resolved;
         // Relative import might reference a package dir: "./core" → "core/mod.zig"
@@ -262,7 +262,7 @@ pub const Resolver = struct {
 
     /// Try path as-is and with source extensions appended.
     /// "core/types" matches "core/types.zig", "core/types.rs", etc.
-    fn matchWithExtensions(self: *const Resolver, path: []const u8) ?[]const u8 {
+    fn matchWithExtensions(self: *const Resolver, allocator: Allocator, path: []const u8) ?[]const u8 {
         // Exact (already has extension)
         if (self.path_index.get(path)) |idx| return self.file_paths[idx];
 
@@ -270,10 +270,9 @@ pub const Resolver = struct {
             ".zig", ".rs", ".py", ".pyi", ".js",  ".jsx", ".mjs", ".ts",  ".tsx", ".mts",
             ".go",  ".c",  ".h",  ".cpp", ".hpp", ".cc",  ".cxx", ".hxx", ".m",   ".mm",
         };
-        var buf: [512]u8 = undefined;
         for (extensions) |ext| {
-            if (path.len + ext.len > buf.len) continue;
-            const full = std.fmt.bufPrint(&buf, "{s}{s}", .{ path, ext }) catch continue;
+            const full = std.fmt.allocPrint(allocator, "{s}{s}", .{ path, ext }) catch continue;
+            defer allocator.free(full);
             if (self.path_index.get(full)) |idx| return self.file_paths[idx];
         }
         return null;
@@ -336,6 +335,21 @@ test "exact path resolution" {
 
     try std.testing.expectEqualStrings("src/core/types.zig", resolver.resolve("core/types", "src/main.zig").?);
     try std.testing.expectEqualStrings("src/main.zig", resolver.resolve("src/main", "src/core/types.zig").?);
+}
+
+test "long paths resolve without fixed buffer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const component = try allocator.alloc(u8, 600);
+    @memset(component, 'a');
+    const long_path = try std.fmt.allocPrint(allocator, "src/{s}.zig", .{component});
+    const long_stem = try std.fmt.allocPrint(allocator, "src/{s}", .{component});
+    const paths = [_][]const u8{ "src/main.zig", long_path };
+    var resolver = try Resolver.init(allocator, &paths);
+    defer resolver.deinit();
+
+    try std.testing.expectEqualStrings(long_path, resolver.resolve(long_stem, "src/main.zig").?);
 }
 
 test "ambiguous suffixes do not resolve arbitrarily" {
