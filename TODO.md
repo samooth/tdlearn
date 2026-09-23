@@ -168,14 +168,14 @@ Prioridades:
 
 ## P1 — configuración, CLI y persistencia
 
-### [ ] RULES-001 — Completar semántica de reglas y globs
+### [x] RULES-001 — Completar semántica de reglas y globs
 
-- Referencias: `src/core/rules.zig:20-391`.
-- [ ] Validar nombres, paths, órdenes y solapamientos ambiguos entre layers.
+- Referencias: `src/core/rules.zig:188-290`, `src/core/rules.zig:560-930`.
+- [x] Validar nombres, paths, órdenes y solapamientos ambiguos entre layers.
 - [x] Implementar una gramática de glob documentada para `*`, `**` y separadores.
-- [ ] Soportar escapes y definir el comportamiento Unicode/Windows.
-- [ ] Separar paths absolutos de paths relativos al root.
-- [ ] Deduplicar violaciones y hacer estable su orden.
+- [x] Soportar escapes y definir el comportamiento Unicode/Windows.
+- [x] Separar paths absolutos de paths relativos al root.
+- [x] Deduplicar violaciones y hacer estable su orden.
 - [x] Añadir tests de patrones conflictivos, `**` y límites de segmentos.
 
 ### [ ] CORE-001 — Normalizar rutas y definir portabilidad

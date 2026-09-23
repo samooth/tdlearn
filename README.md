@@ -85,6 +85,8 @@ to = "src/main.zig"
 reason = "metrics must not import the CLI"
 ```
 
+Layer and boundary paths are root-relative, UTF-8, and use `/` as the canonical separator; ordinary Windows `\` separators in rules are normalized. `*` and `?` stay within a path segment, `**` crosses segments, and `\` escapes a pattern metacharacter. Absolute paths, `..` traversal, duplicate layers, and ambiguous file matches are rejected. Violations are deduplicated and sorted deterministically.
+
 `tdlearn check` exits 1 on any Error-severity violation.
 
 ## Quality Gate — CI regression detection

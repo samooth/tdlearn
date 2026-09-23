@@ -134,12 +134,13 @@ pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
             for (entry) |kv| {
                 if (std.mem.eql(u8, kv.key, "name")) {
                     if (kv.value.asString()) |s| name = try allocator.dupe(u8, s);
+                    try validateLayerName(name);
                 } else if (std.mem.eql(u8, kv.key, "paths")) {
                     if (kv.value.asArray()) |arr| {
                         var list = std.ArrayList([]const u8).empty;
                         for (arr) |item| {
                             if (item.asString()) |s| {
-                                try list.append(allocator, try allocator.dupe(u8, s));
+                                try list.append(allocator, try normalizePattern(allocator, s));
                             }
                         }
                         paths = try list.toOwnedSlice(allocator);
@@ -167,9 +168,9 @@ pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
             var reason: []const u8 = "";
             for (entry) |kv| {
                 if (std.mem.eql(u8, kv.key, "from")) {
-                    if (kv.value.asString()) |s| from = try allocator.dupe(u8, s);
+                    if (kv.value.asString()) |s| from = try normalizePattern(allocator, s);
                 } else if (std.mem.eql(u8, kv.key, "to")) {
-                    if (kv.value.asString()) |s| to = try allocator.dupe(u8, s);
+                    if (kv.value.asString()) |s| to = try normalizePattern(allocator, s);
                 } else if (std.mem.eql(u8, kv.key, "reason")) {
                     if (kv.value.asString()) |s| reason = try allocator.dupe(u8, s);
                 }
@@ -179,7 +180,111 @@ pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
         config.boundaries = try boundaries.toOwnedSlice(allocator);
     }
 
+    try validateLayerConfig(config.layers);
+    try validateBoundaryConfig(config.boundaries);
     return config;
+}
+
+fn validateLayerConfig(layers: []const RulesConfig.Layer) !void {
+    for (layers, 0..) |layer, layer_index| {
+        try validateLayerName(layer.name);
+        for (layer.paths, 0..) |pattern, path_index| {
+            try validatePattern(pattern);
+            for (layer.paths[0..path_index]) |previous| {
+                if (std.mem.eql(u8, previous, pattern)) return error.InvalidRules;
+            }
+            for (layers[0..layer_index]) |previous_layer| {
+                for (previous_layer.paths) |previous_pattern| {
+                    if (std.mem.eql(u8, previous_pattern, pattern)) return error.InvalidRules;
+                }
+            }
+        }
+        for (layers[0..layer_index]) |previous_layer| {
+            if (std.mem.eql(u8, previous_layer.name, layer.name)) return error.InvalidRules;
+        }
+    }
+}
+
+fn validateBoundaryConfig(boundaries: []const RulesConfig.Boundary) !void {
+    for (boundaries, 0..) |boundary, index| {
+        try validatePattern(boundary.from);
+        try validatePattern(boundary.to);
+        for (boundaries[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.from, boundary.from) and
+                std.mem.eql(u8, previous.to, boundary.to)) return error.InvalidRules;
+        }
+    }
+}
+
+fn validateLayerName(name: []const u8) !void {
+    if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidRules;
+    for (name) |character| {
+        if (character <= 0x20 or character == 0x7f or
+            character == '/' or character == '\\' or character == '*' or
+            character == '?' or character == '[' or character == ']') return error.InvalidRules;
+    }
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidRules;
+}
+
+fn validatePattern(pattern: []const u8) !void {
+    if (pattern.len == 0 or !std.unicode.utf8ValidateSlice(pattern)) return error.InvalidRules;
+    if (std.mem.startsWith(u8, pattern, "/")) return error.InvalidRules;
+    if (pattern.len >= 2 and std.ascii.isAlphabetic(pattern[0]) and pattern[1] == ':') return error.InvalidRules;
+    var segments = std.mem.splitScalar(u8, pattern, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidRules;
+        var stars: usize = 0;
+        var index: usize = 0;
+        while (index < segment.len) : (index += 1) {
+            if (segment[index] == '\\') {
+                if (index + 1 >= segment.len) return error.InvalidRules;
+                index += 1;
+                continue;
+            }
+            if (segment[index] == '*') {
+                stars += 1;
+            } else if (segment[index] == '?') {
+                continue;
+            } else if (segment[index] == '[' or segment[index] == ']') {
+                return error.InvalidRules;
+            } else if (segment[index] < 0x20 or segment[index] == 0x7f) {
+                return error.InvalidRules;
+            }
+        }
+        if (stars > 1 and !std.mem.eql(u8, segment, "**")) return error.InvalidRules;
+    }
+}
+
+fn normalizePattern(allocator: Allocator, pattern: []const u8) ![]const u8 {
+    var normalized = std.ArrayList(u8).empty;
+    errdefer normalized.deinit(allocator);
+    var index: usize = 0;
+    while (index < pattern.len) : (index += 1) {
+        if (pattern[index] == '\\' and index + 1 < pattern.len and
+            (normalized.items.len > 0 and normalized.items[normalized.items.len - 1] == '/') and
+            (pattern[index + 1] == '*' or pattern[index + 1] == '?' or
+                pattern[index + 1] == '[' or pattern[index + 1] == ']' or pattern[index + 1] == '\\'))
+        {
+            try normalized.append(allocator, '\\');
+        } else if (pattern[index] == '\\') {
+            try normalized.append(allocator, '/');
+        } else {
+            try normalized.append(allocator, pattern[index]);
+        }
+    }
+    try validatePattern(normalized.items);
+    return try normalized.toOwnedSlice(allocator);
+}
+
+fn validateInputPath(path: []const u8) !void {
+    if (path.len == 0 or !std.unicode.utf8ValidateSlice(path)) return error.InvalidPath;
+    if (path[0] == '/' or path[0] == '\\') return error.InvalidPath;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidPath;
+    if (path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':') return error.InvalidPath;
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidPath;
+    }
 }
 
 fn validateTomlSyntax(allocator: Allocator, contents: []const u8) !void {
@@ -456,7 +561,15 @@ fn nonEmptyString(value: toml_mod.Value) ![]const u8 {
 /// Check a scan against rules. Returns violations (empty = pass).
 pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *const CheckInput) !CheckResult {
     var violations = std.ArrayList(Violation).empty;
-    errdefer violations.deinit(allocator);
+    defer violations.deinit(allocator);
+
+    try validateLayerConfig(config.layers);
+    try validateBoundaryConfig(config.boundaries);
+    for (input.file_paths) |path| try validateInputPath(path);
+    for (input.import_edges) |edge| {
+        try validateInputPath(edge.from);
+        try validateInputPath(edge.to);
+    }
 
     const c = &config.constraints;
     var checked: u32 = 0;
@@ -553,6 +666,8 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
         }
     }
 
+    for (input.file_paths) |path| _ = try layerOf(config.layers, path);
+
     // ── Layer rule ──
     // Semantics: HIGHER order = more foundational (core/infra at the top).
     // Violation when the importing file's layer order is GREATER than the
@@ -561,8 +676,8 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
     if (config.layers.len >= 2) {
         checked += 1;
         for (input.import_edges) |edge| {
-            const from_layer = layerOf(config.layers, edge.from) orelse continue;
-            const to_layer = layerOf(config.layers, edge.to) orelse continue;
+            const from_layer = (try layerOf(config.layers, edge.from)) orelse continue;
+            const to_layer = (try layerOf(config.layers, edge.to)) orelse continue;
             // Violation when importer sits at a HIGHER order (less foundational)
             // than the imported module.
             if (from_layer.order > to_layer.order) {
@@ -602,20 +717,57 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
         }
     }
 
+    std.sort.heap(Violation, violations.items, {}, violationLessThan);
+    var unique = std.ArrayList(Violation).empty;
+    defer unique.deinit(allocator);
+    for (violations.items) |violation| {
+        if (unique.items.len > 0 and sameViolation(unique.items[unique.items.len - 1], violation)) continue;
+        try unique.append(allocator, violation);
+    }
+
     return .{
         .rules_checked = checked,
-        .violations = try violations.toOwnedSlice(allocator),
+        .violations = try unique.toOwnedSlice(allocator),
     };
 }
 
-/// Find the first layer whose paths match the file.
-fn layerOf(layers: []const RulesConfig.Layer, path: []const u8) ?*const RulesConfig.Layer {
-    for (layers) |*l| {
-        for (l.paths) |pattern| {
-            if (globMatch(pattern, path)) return l;
+fn violationLessThan(_: void, left: Violation, right: Violation) bool {
+    const rule_order = std.mem.order(u8, left.rule, right.rule);
+    if (rule_order == .lt) return true;
+    if (rule_order == .gt) return false;
+    const from_order = std.mem.order(u8, fileAt(left, 0), fileAt(right, 0));
+    if (from_order == .lt) return true;
+    if (from_order == .gt) return false;
+    const to_order = std.mem.order(u8, fileAt(left, 1), fileAt(right, 1));
+    if (to_order == .lt) return true;
+    if (to_order == .gt) return false;
+    return std.mem.lessThan(u8, left.message, right.message);
+}
+
+fn sameViolation(left: Violation, right: Violation) bool {
+    if (!std.mem.eql(u8, left.rule, right.rule) or left.files.len != right.files.len) return false;
+    for (left.files, 0..) |file, index| {
+        if (!std.mem.eql(u8, file, right.files[index])) return false;
+    }
+    return true;
+}
+
+fn fileAt(violation: Violation, index: usize) []const u8 {
+    return if (index < violation.files.len) violation.files[index] else "";
+}
+
+/// Find the unique layer whose paths match the file.
+fn layerOf(layers: []const RulesConfig.Layer, path: []const u8) !?*const RulesConfig.Layer {
+    var found: ?*const RulesConfig.Layer = null;
+    for (layers) |*layer| {
+        for (layer.paths) |pattern| {
+            if (!globMatch(pattern, path)) continue;
+            if (found != null) return error.AmbiguousLayer;
+            found = layer;
+            break;
         }
     }
-    return null;
+    return found;
 }
 
 fn pathBaseName(path: []const u8) []const u8 {
@@ -623,12 +775,15 @@ fn pathBaseName(path: []const u8) []const u8 {
     return path[separator + 1 ..];
 }
 
-/// Glob matcher supporting:
-///   exact match, `*` (single segment), `**` (any depth),
-///   `dir/**`, `dir/*`, `dir/prefix...`
+/// Glob matcher supporting exact paths, `*` within one segment, `**` across
+/// segments, and `?` for one UTF-8 codepoint. A backslash escapes the next
+/// pattern byte. Rule files normalize ordinary Windows separators to `/`;
+/// literal paths supplied to the checker must already be root-relative `/`
+/// paths. Invalid, absolute, and traversal patterns are rejected at parse time.
 pub fn globMatch(pattern: []const u8, path: []const u8) bool {
     if (std.mem.eql(u8, pattern, path)) return true;
     if (matchSegments(pattern, path)) return true;
+    if (std.mem.indexOfScalar(u8, pattern, '\\') != null and matchSegmentsNative(pattern, 0, path, 0)) return true;
 
     if (std.mem.indexOfScalar(u8, pattern, '/') == null) {
         return matchSegment(pattern, pathBaseName(path));
@@ -644,6 +799,35 @@ pub fn globMatch(pattern: []const u8, path: []const u8) bool {
     }
 
     return false;
+}
+
+fn matchSegmentsNative(pattern: []const u8, pattern_start: usize, path: []const u8, path_start: usize) bool {
+    if (pattern_start >= pattern.len) return path_start >= path.len;
+    const pattern_end = nativeSegmentEnd(pattern, pattern_start);
+    const segment = pattern[pattern_start..pattern_end];
+    if (std.mem.eql(u8, segment, "**")) {
+        const next_pattern = if (pattern_end < pattern.len) pattern_end + 1 else pattern_end;
+        if (next_pattern >= pattern.len) return true;
+        var current = path_start;
+        while (true) {
+            if (matchSegmentsNative(pattern, next_pattern, path, current)) return true;
+            if (current >= path.len) return false;
+            const end = segmentEnd(path, current);
+            current = if (end < path.len) end + 1 else end;
+        }
+    }
+    if (path_start >= path.len) return false;
+    const path_end = segmentEnd(path, path_start);
+    if (!matchSegment(segment, path[path_start..path_end])) return false;
+    const next_pattern = if (pattern_end < pattern.len) pattern_end + 1 else pattern_end;
+    const next_path = if (path_end < path.len) path_end + 1 else path_end;
+    return matchSegmentsNative(pattern, next_pattern, path, next_path);
+}
+
+fn nativeSegmentEnd(value: []const u8, start: usize) usize {
+    var index = start;
+    while (index < value.len and value[index] != '/' and value[index] != '\\') : (index += 1) {}
+    return index;
 }
 
 fn matchSegments(pattern: []const u8, path: []const u8) bool {
@@ -688,9 +872,27 @@ fn matchSegment(pattern: []const u8, text: []const u8) bool {
     var star_text_index: usize = 0;
 
     while (text_index < text.len) {
-        if (pattern_index < pattern.len and
-            (pattern[pattern_index] == '?' or pattern[pattern_index] == text[text_index]))
+        if (pattern_index < pattern.len and pattern[pattern_index] == '\\' and
+            pattern_index + 1 < pattern.len)
         {
+            if (pattern[pattern_index + 1] != text[text_index]) {
+                if (star_index) |star| {
+                    pattern_index = star + 1;
+                    star_text_index += 1;
+                    if (star_text_index > text.len) return false;
+                    text_index = star_text_index;
+                    continue;
+                }
+                return false;
+            }
+            pattern_index += 2;
+            text_index += 1;
+        } else if (pattern_index < pattern.len and pattern[pattern_index] == '?') {
+            const length = utf8SequenceLength(text[text_index]) orelse return false;
+            if (length > text.len - text_index) return false;
+            pattern_index += 1;
+            text_index += length;
+        } else if (pattern_index < pattern.len and pattern[pattern_index] == text[text_index]) {
             pattern_index += 1;
             text_index += 1;
         } else if (pattern_index < pattern.len and pattern[pattern_index] == '*') {
@@ -711,6 +913,16 @@ fn matchSegment(pattern: []const u8, text: []const u8) bool {
     return pattern_index == pattern.len;
 }
 
+fn utf8SequenceLength(first: u8) ?usize {
+    return switch (first) {
+        0x00...0x7f => 1,
+        0xc2...0xdf => 2,
+        0xe0...0xef => 3,
+        0xf0...0xf4 => 4,
+        else => null,
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────
 
 test "glob match basics" {
@@ -726,6 +938,15 @@ test "glob match basics" {
     try std.testing.expect(!globMatch("*.zig", "file.rs"));
     try std.testing.expect(globMatch("src/foo*.zig", "src/foobar.zig"));
     try std.testing.expect(!globMatch("src/foo*.zig", "src/bar.zig"));
+}
+
+test "glob escapes and unicode wildcards" {
+    try std.testing.expect(globMatch("src/\\*.zig", "src/*.zig"));
+    try std.testing.expect(!globMatch("src/\\*.zig", "src/file.zig"));
+    try std.testing.expect(globMatch("src/?.zig", "src/é.zig"));
+    try std.testing.expect(!globMatch("src/?.zig", "src/éé.zig"));
+    try std.testing.expect(globMatch("src/Ж*.zig", "src/Журнал.zig"));
+    try std.testing.expect(globMatch("src\\core\\*.zig", "src/core/file.zig"));
 }
 
 test "glob segment boundaries" {
@@ -814,6 +1035,70 @@ test "parse rules rejects incomplete layers" {
     try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
         \\[[layers]]
         \\name = "core"
+    ));
+}
+
+test "parse rules normalizes Windows separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const config = try parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["src\core\types.zig", "src\core\*.zig", "src/\*.zig"]
+        \\order = 0
+    );
+    try std.testing.expectEqualStrings("src/core/types.zig", config.layers[0].paths[0]);
+    try std.testing.expectEqualStrings("src/core/*.zig", config.layers[0].paths[1]);
+    try std.testing.expectEqualStrings("src/\\*.zig", config.layers[0].paths[2]);
+}
+
+test "parse rules rejects invalid layer names and paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "bad name"
+        \\paths = ["src/**"]
+        \\order = 0
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["/absolute/**"]
+        \\order = 0
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["src/../outside/**"]
+        \\order = 0
+    ));
+}
+
+test "parse rules rejects duplicate layer names and patterns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["src/**"]
+        \\order = 0
+        \\
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["lib/**"]
+        \\order = 1
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["src/**"]
+        \\order = 0
+        \\
+        \\[[layers]]
+        \\name = "app"
+        \\paths = ["src/**"]
+        \\order = 1
     ));
 }
 
@@ -907,6 +1192,93 @@ test "layer order violation" {
     try std.testing.expect(!result.pass());
     try std.testing.expectEqual(@as(usize, 1), result.violations.len);
     try std.testing.expectEqualStrings("layer_order", result.violations[0].rule);
+}
+
+test "ambiguous layers are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const config = try parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+        \\paths = ["src/*"]
+        \\order = 0
+        \\
+        \\[[layers]]
+        \\name = "app"
+        \\paths = ["src/**"]
+        \\order = 1
+    );
+    const input = CheckInput{
+        .quality_signal = 1.0,
+        .modularity = 1.0,
+        .acyclicity = 1.0,
+        .depth = 1.0,
+        .equality = 1.0,
+        .redundancy = 1.0,
+        .cycle_count = 0,
+        .max_file_lines = 10,
+        .max_fn_lines = 10,
+        .import_edges = &.{},
+        .file_paths = &[_][]const u8{"src/file.zig"},
+    };
+    try std.testing.expectError(error.AmbiguousLayer, checkRules(arena.allocator(), &config, &input));
+}
+
+test "violations are deduplicated and deterministically ordered" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const config = try parseRules(arena.allocator(),
+        \\[[boundaries]]
+        \\from = "src/**"
+        \\to = "lib/**"
+        \\
+        \\[[boundaries]]
+        \\from = "src/*"
+        \\to = "lib/*"
+    );
+    const edges = [_]CheckInput.Edge{
+        .{ .from = "src/z.zig", .to = "lib/b.zig" },
+        .{ .from = "src/a.zig", .to = "lib/a.zig" },
+        .{ .from = "src/z.zig", .to = "lib/b.zig" },
+    };
+    const input = CheckInput{
+        .quality_signal = 1.0,
+        .modularity = 1.0,
+        .acyclicity = 1.0,
+        .depth = 1.0,
+        .equality = 1.0,
+        .redundancy = 1.0,
+        .cycle_count = 0,
+        .max_file_lines = 10,
+        .max_fn_lines = 10,
+        .import_edges = &edges,
+        .file_paths = &.{},
+    };
+    const result = try checkRules(arena.allocator(), &config, &input);
+    try std.testing.expectEqual(@as(usize, 2), result.violations.len);
+    try std.testing.expectEqualStrings("src/a.zig", result.violations[0].files[0]);
+    try std.testing.expectEqualStrings("src/z.zig", result.violations[1].files[0]);
+}
+
+test "check rules rejects absolute input paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const config = try parseRules(arena.allocator(), "[constraints]\nmin_quality = 0.5");
+    const edges = [_]CheckInput.Edge{.{ .from = "/tmp/a.zig", .to = "src/b.zig" }};
+    const input = CheckInput{
+        .quality_signal = 1.0,
+        .modularity = 1.0,
+        .acyclicity = 1.0,
+        .depth = 1.0,
+        .equality = 1.0,
+        .redundancy = 1.0,
+        .cycle_count = 0,
+        .max_file_lines = 10,
+        .max_fn_lines = 10,
+        .import_edges = &edges,
+        .file_paths = &.{},
+    };
+    try std.testing.expectError(error.InvalidPath, checkRules(arena.allocator(), &config, &input));
 }
 
 test "boundary violation" {
