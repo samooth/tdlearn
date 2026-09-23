@@ -396,7 +396,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     const all_file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
     const file_paths = try filterSourcePaths(arena, all_file_paths);
-    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdges(arena, io, all_file_paths);
+    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRoot(arena, io, path, all_file_paths);
 
     var source_files = std.ArrayList(core.types.FileNode).empty;
     defer source_files.deinit(arena);
@@ -412,7 +412,8 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     var max_fn_lines: u32 = 0;
     for (file_paths) |fpath| {
         const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
-        const contents = readFileOrNull(arena, io, fpath) orelse return error.FileNotFound;
+        const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
+        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
         try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
 
@@ -763,6 +764,39 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     }
     std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
     return error.GateFailed;
+}
+
+test "analysis pipeline runs against a temporary project" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
+    src_dir.close(io);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/main.zig",
+        .data =
+        \\const helper = @import("helper.zig");
+        \\pub fn main() void {
+        \\    helper();
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "src/helper.zig",
+        .data =
+        \\pub fn helper() void {}
+        ,
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const result = try runAnalysis(arena.allocator(), io, project_path);
+    try std.testing.expectEqual(@as(u32, 2), result.report.file_count);
+    try std.testing.expectEqual(@as(usize, 1), result.import_edges.len);
+    try std.testing.expectEqual(@as(u32, 2), result.report.total_functions);
+    try std.testing.expectEqual(@as(u32, 0), result.report.dead_functions);
 }
 
 test "filter source paths excludes non-source files" {

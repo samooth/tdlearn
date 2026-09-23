@@ -19,10 +19,19 @@ pub const GraphBuilder = struct {
         io: Io,
         file_paths: []const []const u8,
     ) ![]core.types.ImportEdge {
+        return buildImportEdgesAtRoot(allocator, io, "", file_paths);
+    }
+
+    pub fn buildImportEdgesAtRoot(
+        allocator: Allocator,
+        io: Io,
+        root_path: []const u8,
+        file_paths: []const []const u8,
+    ) ![]core.types.ImportEdge {
         var edges = std.ArrayList(core.types.ImportEdge).empty;
         errdefer edges.deinit(allocator);
 
-        const aliases = try manifests.readPackageAliases(allocator, io, file_paths);
+        const aliases = try manifests.readPackageAliasesAtRoot(allocator, io, root_path, file_paths);
         var source_paths = std.ArrayList([]const u8).empty;
         defer source_paths.deinit(allocator);
         for (file_paths) |path| {
@@ -36,7 +45,7 @@ pub const GraphBuilder = struct {
 
         for (source_paths.items) |path| {
             const lang = detectLangFor(path);
-            const contents = try readFile(allocator, io, path);
+            const contents = try readFile(allocator, io, root_path, path);
             const raw_imports = try imports_mod.ImportExtractor.extract(allocator, contents, lang);
 
             for (raw_imports) |raw| {
@@ -97,8 +106,9 @@ pub const GraphBuilder = struct {
         return "unknown";
     }
 
-    fn readFile(allocator: Allocator, io: Io, path: []const u8) ![]const u8 {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    fn readFile(allocator: Allocator, io: Io, root_path: []const u8, path: []const u8) ![]const u8 {
+        const full_path = if (root_path.len == 0) path else try std.mem.join(allocator, "/", &.{ root_path, path });
+        const file = try std.Io.Dir.cwd().openFile(io, full_path, .{});
         defer file.close(io);
 
         const stat = try file.stat(io);

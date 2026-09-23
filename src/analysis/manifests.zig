@@ -26,6 +26,15 @@ pub fn readPackageAliases(
     io: Io,
     file_paths: []const []const u8,
 ) ![]Alias {
+    return readPackageAliasesAtRoot(allocator, io, "", file_paths);
+}
+
+pub fn readPackageAliasesAtRoot(
+    allocator: Allocator,
+    io: Io,
+    root_path: []const u8,
+    file_paths: []const []const u8,
+) ![]Alias {
     var aliases = std.ArrayList(Alias).empty;
     errdefer aliases.deinit(allocator);
 
@@ -38,7 +47,7 @@ pub fn readPackageAliases(
         // Skip manifests inside excluded paths (target/, node_modules/)
         if (isInExcludedDir(path)) continue;
 
-        const contents = readSmallFile(allocator, io, path) catch continue orelse continue;
+        const contents = readSmallFile(allocator, io, root_path, path) catch continue orelse continue;
         const dir = core.path_utils.parentDir(path) orelse "";
 
         if (is_cargo) {
@@ -165,8 +174,9 @@ fn isInExcludedDir(path: []const u8) bool {
     return false;
 }
 
-fn readSmallFile(allocator: Allocator, io: Io, path: []const u8) !?[]const u8 {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+fn readSmallFile(allocator: Allocator, io: Io, root_path: []const u8, path: []const u8) !?[]const u8 {
+    const full_path = if (root_path.len == 0) path else try std.mem.join(allocator, "/", &.{ root_path, path });
+    const file = std.Io.Dir.cwd().openFile(io, full_path, .{}) catch return null;
     defer file.close(io);
     const stat = file.stat(io) catch return null;
     if (stat.size == 0 or stat.size > 64 * 1024) return null;
