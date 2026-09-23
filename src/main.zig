@@ -414,6 +414,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
         const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
         const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
+        if (contents.len > settings.max_parse_size_kb * 1024) return error.FileTooLarge;
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
         try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
 
@@ -431,10 +432,11 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     }
 
     // Build call graph from extracted functions + import edges
-    const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdges(
+    const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdgesWithLimit(
         arena,
         file_funcs.items,
         import_edges,
+        settings.max_call_targets,
     );
 
     // Build inheritance graph from extracted classes + import edges

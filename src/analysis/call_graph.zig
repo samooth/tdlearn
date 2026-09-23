@@ -24,6 +24,15 @@ pub const CallGraphBuilder = struct {
         file_funcs: []const core.types.FileFuncs,
         import_edges: []const core.types.ImportEdge,
     ) ![]core.types.CallEdge {
+        return buildCallEdgesWithLimit(allocator, file_funcs, import_edges, 0);
+    }
+
+    pub fn buildCallEdgesWithLimit(
+        allocator: Allocator,
+        file_funcs: []const core.types.FileFuncs,
+        import_edges: []const core.types.ImportEdge,
+        max_call_targets: u32,
+    ) ![]core.types.CallEdge {
         var edges = std.ArrayList(core.types.CallEdge).empty;
         errdefer edges.deinit(allocator);
 
@@ -83,9 +92,16 @@ pub const CallGraphBuilder = struct {
 
             const imported = imports_by_file.get(ff.file);
 
+            var target_counts = std.StringHashMap(u32).init(allocator);
+            defer target_counts.deinit();
             for (sites) |site| {
                 // Find the enclosing function for the caller name
                 const caller = enclosingFunc(ff.funcs, site.line) orelse continue;
+                if (max_call_targets > 0) {
+                    const count = target_counts.get(caller.name) orelse 0;
+                    if (count >= max_call_targets) continue;
+                    try target_counts.put(caller.name, count + 1);
+                }
 
                 // 1. Same-file call — no cross-file edge
                 if (hasLocalFunc(ff.funcs, site.callee)) continue;
@@ -507,6 +523,33 @@ test "ambiguous public names unresolved" {
     // util is public in two files, no import — ambiguous, dropped
     const edges = try CallGraphBuilder.buildCallEdges(arena.allocator(), &.{ a, b, c }, &.{});
     try std.testing.expectEqual(@as(usize, 0), edges.len);
+}
+
+test "call target limit is enforced per caller" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const caller = core.types.FileFuncs{
+        .file = "src/caller.zig",
+        .contents = "pub fn caller() void {\n    first();\n    second();\n}",
+        .funcs = &[_]core.types.FuncInfo{makeFunc("caller", 1, 4, true)},
+    };
+    const first = core.types.FileFuncs{
+        .file = "src/first.zig",
+        .contents = "pub fn first() void {}",
+        .funcs = &[_]core.types.FuncInfo{makeFunc("first", 1, 1, true)},
+    };
+    const second = core.types.FileFuncs{
+        .file = "src/second.zig",
+        .contents = "pub fn second() void {}",
+        .funcs = &[_]core.types.FuncInfo{makeFunc("second", 1, 1, true)},
+    };
+    const imports = [_]core.types.ImportEdge{
+        .{ .from_file = caller.file, .to_file = first.file },
+        .{ .from_file = caller.file, .to_file = second.file },
+    };
+    const edges = try CallGraphBuilder.buildCallEdgesWithLimit(arena.allocator(), &.{ caller, first, second }, &imports, 1);
+    try std.testing.expectEqual(@as(usize, 1), edges.len);
+    try std.testing.expectEqualStrings("first", edges[0].to_func);
 }
 
 test "dedup identical call edges" {

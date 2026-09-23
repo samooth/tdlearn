@@ -105,6 +105,14 @@ pub const Walker = struct {
         return result;
     }
 
+    fn isExcludedDirectory(self: *const Walker, name: []const u8) bool {
+        if (lang_registry.LangRegistry.isExcludedDir(name)) return true;
+        for (self.settings.exclude_dirs) |excluded| {
+            if (std.mem.eql(u8, name, excluded)) return true;
+        }
+        return false;
+    }
+
     fn walkDir(self: *Walker, dir_path: []const u8, files: *std.ArrayList(core.types.FileNode)) !void {
         var dir = try std.Io.Dir.cwd().openDir(self.io, dir_path, .{
             .iterate = true,
@@ -124,7 +132,7 @@ pub const Walker = struct {
 
         for (entries.items) |entry| {
             if (entry.kind != .file and entry.kind != .directory) continue;
-            if (entry.kind == .directory and lang_registry.LangRegistry.isExcludedDir(entry.name)) {
+            if (entry.kind == .directory and self.isExcludedDirectory(entry.name)) {
                 continue;
             }
 
