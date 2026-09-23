@@ -195,6 +195,23 @@ test "Snapshot with import edges" {
     try std.testing.expectEqual(@as(usize, 1), fan_out.len);
 }
 
+test "Snapshot propagates allocation failures" {
+    var files = [_]types.FileNode{
+        .{ .path = "src/main.zig", .name = "main.zig", .is_dir = false },
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Snapshot.init(
+        failing.allocator(),
+        std.testing.io,
+        ".",
+        files[0..],
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+    ));
+}
+
 test "Snapshot rejects duplicate file paths" {
     const allocator = std.testing.allocator;
     var files = [_]types.FileNode{

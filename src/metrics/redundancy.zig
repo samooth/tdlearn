@@ -34,14 +34,13 @@ pub fn shannonEntropyNormalized(values: []const f64) f64 {
 
 /// Compute structural entropy: normalized Shannon entropy of file sizes.
 /// Returns 1.0 for 0-1 files (trivially consistent).
-pub fn computeStructuralEntropy(file_lines: []const u32) f64 {
+pub fn computeStructuralEntropy(allocator: Allocator, file_lines: []const u32) !f64 {
     if (file_lines.len <= 1) return 1.0;
 
-    // Convert to f64
-    var f64_values = std.ArrayList(f64).init(std.heap.page_allocator);
-    defer f64_values.deinit();
-    for (file_lines) |v| {
-        f64_values.append(@floatFromInt(v)) catch return 1.0;
+    var f64_values = std.ArrayList(f64).initCapacity(allocator, file_lines.len);
+    defer f64_values.deinit(allocator);
+    for (file_lines) |value| {
+        try f64_values.append(allocator, @floatFromInt(value));
     }
 
     return shannonEntropyNormalized(f64_values.items);
@@ -83,11 +82,17 @@ test "shannon entropy all zeros" {
 
 test "structural entropy single file" {
     const lines = [_]u32{100};
-    try std.testing.expectEqual(@as(f64, 1.0), computeStructuralEntropy(&lines));
+    try std.testing.expectEqual(@as(f64, 1.0), try computeStructuralEntropy(std.testing.allocator, &lines));
+}
+
+test "structural entropy propagates allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const lines = [_]u32{ 100, 200 };
+    try std.testing.expectError(error.OutOfMemory, computeStructuralEntropy(failing.allocator(), &lines));
 }
 
 test "structural entropy equal files" {
     const lines = [_]u32{ 100, 100, 100, 100 };
-    const entropy = computeStructuralEntropy(&lines);
+    const entropy = try computeStructuralEntropy(std.testing.allocator, &lines);
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), entropy, 0.001);
 }

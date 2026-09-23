@@ -25,6 +25,7 @@ pub const Walker = struct {
     io: Io,
     root_path: []const u8,
     registry: lang_registry.LangRegistry,
+    settings: core.settings.Settings,
 
     /// Live allocator — must be computed on demand (arena is self-referential;
     /// capturing `arena.allocator()` at init would dangle after struct copy).
@@ -33,11 +34,23 @@ pub const Walker = struct {
     }
 
     pub fn init(parent_allocator: Allocator, io: Io, root_path: []const u8) !Walker {
+        return initWithSettings(parent_allocator, io, root_path, .{});
+    }
+
+    pub fn initWithSettings(
+        parent_allocator: Allocator,
+        io: Io,
+        root_path: []const u8,
+        settings: core.settings.Settings,
+    ) !Walker {
+        var sanitized = settings;
+        sanitized.sanitize();
         return .{
             .arena = std.heap.ArenaAllocator.init(parent_allocator),
             .io = io,
             .root_path = root_path,
             .registry = try lang_registry.LangRegistry.init(parent_allocator),
+            .settings = sanitized,
         };
     }
 
@@ -183,7 +196,8 @@ pub const Walker = struct {
         defer file.close(self.io);
 
         const stat = try file.stat(self.io);
-        if (stat.size > 1024 * 1024) return error.FileTooLarge;
+        const max_bytes = self.settings.max_file_size_kb * 1024;
+        if (stat.size > max_bytes) return error.FileTooLarge;
         if (stat.size == 0) return LineCounts{};
 
         const buf_size: usize = @intCast(stat.size);

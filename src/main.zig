@@ -387,7 +387,9 @@ fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8
 /// All allocations come from `arena` (caller-owned).
 fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
     try validateRoot(io, path);
-    var walker = try analysis.walker.Walker.init(arena, io, path);
+    var settings = core.settings.Settings{};
+    settings.sanitize();
+    var walker = try analysis.walker.Walker.initWithSettings(arena, io, path, settings);
     defer walker.deinit();
 
     const files = try walker.walk();
