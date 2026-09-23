@@ -10,6 +10,8 @@ pub const Baseline = struct {
     quality_signal: f64 = 0.0,
     cycle_count: u32 = 0,
     max_depth: u32 = 0,
+    /// Total extracted functions; dead and duplicate counts are subsets or
+    /// extra duplicate instances and cannot exceed this value.
     total_functions: u32 = 0,
     dead_functions: u32 = 0,
     duplicate_functions: u32 = 0,
@@ -21,11 +23,23 @@ pub const Baseline = struct {
         if (!std.math.isFinite(self.quality_signal) or self.quality_signal < 0.0 or self.quality_signal > 1.0) {
             return error.InvalidBaseline;
         }
+        const tolerance: f64 = degradation_tolerance;
+        if (!std.math.isFinite(tolerance) or tolerance < 0.0) {
+            return error.InvalidBaseline;
+        }
+        if (self.dead_functions > self.total_functions or
+            self.duplicate_functions > self.total_functions or
+            (self.total_functions > 0 and self.duplicate_functions >= self.total_functions))
+        {
+            return error.InvalidBaseline;
+        }
     }
 
     /// Compare current metrics against this baseline.
     /// Returns a list of degradation descriptions (empty = no regression).
     pub fn diff(self: Baseline, current: Baseline, allocator: Allocator) ![]const []const u8 {
+        try self.validate();
+        try current.validate();
         var violations = std.ArrayList([]const u8).empty;
         errdefer violations.deinit(allocator);
 
@@ -77,7 +91,7 @@ pub fn writeBaseline(allocator: Allocator, baseline: Baseline) ![]u8 {
 
 /// Parse a baseline from JSON contents.
 pub fn readBaseline(allocator: Allocator, contents: []const u8) !Baseline {
-    var parsed = try std.json.parseFromSlice(Baseline, allocator, contents, .{});
+    var parsed = std.json.parseFromSlice(Baseline, allocator, contents, .{}) catch return error.InvalidBaseline;
     defer parsed.deinit();
     try parsed.value.validate();
     return parsed.value;
@@ -155,6 +169,7 @@ test "improvements are not violations" {
         .quality_signal = 0.5,
         .cycle_count = 5,
         .max_depth = 10,
+        .total_functions = 30,
         .dead_functions = 20,
         .duplicate_functions = 8,
     };
@@ -162,6 +177,7 @@ test "improvements are not violations" {
         .quality_signal = 0.9,
         .cycle_count = 0,
         .max_depth = 2,
+        .total_functions = 30,
         .dead_functions = 0,
         .duplicate_functions = 0,
     };
@@ -184,6 +200,32 @@ test "baseline rejects invalid schema and score" {
         arena.allocator(),
         .{ .quality_signal = -0.1 },
     ));
+}
+
+test "baseline rejects inconsistent function counters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectError(error.InvalidBaseline, writeBaseline(allocator, .{
+        .total_functions = 2,
+        .dead_functions = 3,
+    }));
+    try std.testing.expectError(error.InvalidBaseline, writeBaseline(allocator, .{
+        .total_functions = 2,
+        .duplicate_functions = 2,
+    }));
+    try std.testing.expectError(error.InvalidBaseline, readBaseline(allocator,
+        \\{"schema_version": 1, "quality_signal": 0.5, "total_functions": 1, "dead_functions": 2}
+    ));
+}
+
+test "baseline rejects truncated and malformed JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectError(error.InvalidBaseline, readBaseline(allocator, "{\"schema_version\": 1"));
+    try std.testing.expectError(error.InvalidBaseline, readBaseline(allocator, "not-json"));
+    try std.testing.expectError(error.InvalidBaseline, readBaseline(allocator, ""));
 }
 
 test "parse legacy/baseline json with missing fields" {
