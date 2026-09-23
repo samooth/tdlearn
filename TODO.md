@@ -185,10 +185,13 @@ Prioridades:
 ### [ ] JSON-001 — Versionar y estabilizar la salida JSON
 
 - Referencias: `src/main.zig:87-126,318-487`, `README.md:95-109`.
-- [ ] Añadir `schema_version`, versión de herramienta, root y unidades.
-- [ ] Incluir archivos asociados, rule, severidad, `from`, `to` y métricas anterior/nueva donde existan.
+- [x] Añadir `schema_version` y versión de herramienta.
+- [ ] Añadir root y unidades.
+- [x] Incluir archivos asociados, rule, severidad, `from` y `to` donde existan.
+- [ ] Incluir métricas anterior/nueva donde existan.
 - [ ] Definir un envelope único para errores de uso, configuración, I/O y baseline.
-- [ ] Emitir JSON también para `gate --save --json` y fallos de configuración.
+- [x] Emitir JSON para `gate --save --json`.
+- [ ] Emitir JSON para fallos de configuración.
 - [ ] Añadir golden tests y asegurar que el JSON exitoso no escribe diagnósticos en stdout.
 
 ### [ ] BASELINE-001 — Hacer robusto el baseline y su persistencia

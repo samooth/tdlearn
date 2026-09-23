@@ -98,6 +98,8 @@ All commands accept `--json` for machine-readable output on stdout:
 
 ```json
 {
+  "schema_version": 1,
+  "tool_version": "0.1.0",
   "quality_signal": 7684,
   "bottleneck": "equality",
   "files": 31,

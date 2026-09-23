@@ -3,6 +3,9 @@ const core = @import("core");
 const metrics = @import("metrics");
 const analysis = @import("analysis");
 
+const json_schema_version: u32 = 1;
+const tool_version = "0.1.0";
+
 const CliOptions = struct {
     command: []const u8,
     path: []const u8 = ".",
@@ -171,6 +174,8 @@ const JsonRootCauses = struct {
 };
 
 const JsonScan = struct {
+    schema_version: u32,
+    tool_version: []const u8,
     quality_signal: u32,
     bottleneck: []const u8,
     files: u32,
@@ -185,6 +190,8 @@ const JsonScan = struct {
 };
 
 const JsonCheck = struct {
+    schema_version: u32,
+    tool_version: []const u8,
     pass: bool,
     rules_checked: u32,
     quality_signal: u32,
@@ -195,13 +202,24 @@ const JsonViolation = struct {
     rule: []const u8,
     severity: []const u8,
     message: []const u8,
+    from: ?[]const u8,
+    to: ?[]const u8,
 };
 
 const JsonGate = struct {
+    schema_version: u32,
+    tool_version: []const u8,
     pass: bool,
     quality_signal: u32,
     baseline_quality: u32,
     violations: []const []const u8,
+};
+
+const JsonGateSave = struct {
+    schema_version: u32,
+    tool_version: []const u8,
+    saved: bool,
+    quality_signal: u32,
 };
 
 fn scoreInt(score: f64) u32 {
@@ -342,6 +360,8 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
 
     if (json_flag) {
         const payload = JsonScan{
+            .schema_version = json_schema_version,
+            .tool_version = tool_version,
             .quality_signal = report.quality_signal_int,
             .bottleneck = report.bottleneck,
             .files = report.file_count,
@@ -416,6 +436,8 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     const rules_contents = readFileOrNull(aa, io, rules_path) orelse {
         if (json_flag) {
             const payload = JsonCheck{
+                .schema_version = json_schema_version,
+                .tool_version = tool_version,
                 .pass = false,
                 .rules_checked = 0,
                 .quality_signal = 0,
@@ -463,9 +485,13 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
                 .rule = v.rule,
                 .severity = v.severity.label(),
                 .message = v.message,
+                .from = if (v.files.len >= 2) v.files[0] else null,
+                .to = if (v.files.len >= 2) v.files[1] else null,
             };
         }
         const payload = JsonCheck{
+            .schema_version = json_schema_version,
+            .tool_version = tool_version,
             .pass = check.pass(),
             .rules_checked = check.rules_checked,
             .quality_signal = report.quality_signal_int,
@@ -528,6 +554,17 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
         defer file.close(io);
         try file.writePositionalAll(io, json, 0);
 
+        if (json_flag) {
+            const payload = JsonGateSave{
+                .schema_version = json_schema_version,
+                .tool_version = tool_version,
+                .saved = true,
+                .quality_signal = result.report.quality_signal_int,
+            };
+            try printJsonStdout(io, aa, payload);
+            return;
+        }
+
         std.debug.print("tdlearn gate — baseline saved\n", .{});
         std.debug.print("Quality: {d}/10000\n", .{result.report.quality_signal_int});
         std.debug.print("Baseline written to {s}\n", .{baseline_path});
@@ -556,6 +593,8 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
 
     if (json_flag) {
         const payload = JsonGate{
+            .schema_version = json_schema_version,
+            .tool_version = tool_version,
             .pass = violations.len == 0,
             .quality_signal = result.report.quality_signal_int,
             .baseline_quality = @intFromFloat(saved.quality_signal * 10000),
