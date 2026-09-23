@@ -40,6 +40,7 @@ pub const FunctionExtractor = struct {
 
             // Find body end via brace matching or Python indentation.
             const end_line = findBodyEnd(contents, line_no, decl.open_brace, start_indent) catch line_no;
+            const complexity = computeComplexity(allocator, contents, line_no, end_line, lang);
             const is_public = decl.pub_keyword;
 
             try funcs.append(allocator, .{
@@ -47,6 +48,9 @@ pub const FunctionExtractor = struct {
                 .start_line = line_no,
                 .end_line = end_line,
                 .line_count = end_line - line_no + 1,
+                .cyclomatic_complexity = complexity.cyclomatic,
+                .cognitive_complexity = complexity.cognitive,
+                .param_count = complexity.params,
                 .is_public = is_public,
                 .is_method = decl.is_method,
             });
@@ -60,6 +64,12 @@ pub const FunctionExtractor = struct {
         pub_keyword: bool,
         is_method: bool,
         open_brace: bool,
+    };
+
+    const Complexity = struct {
+        cyclomatic: u32 = 1,
+        cognitive: u32 = 0,
+        params: u32 = 0,
     };
 
     /// Detect a function declaration on this line for the given language.
@@ -304,6 +314,256 @@ pub const FunctionExtractor = struct {
         return false;
     }
 
+    const ComplexityState = struct {
+        block_comment: bool = false,
+        triple_quote: u8 = 0,
+        template: bool = false,
+    };
+
+    fn computeComplexity(
+        allocator: Allocator,
+        contents: []const u8,
+        start_line: u32,
+        end_line: u32,
+        lang: []const u8,
+    ) Complexity {
+        var result = Complexity{};
+        var state = ComplexityState{};
+        var nesting: u32 = 0;
+        var line_no: u32 = 0;
+        var lines = std.mem.splitScalar(u8, contents, '\n');
+        while (lines.next()) |raw| {
+            line_no += 1;
+            if (line_no < start_line) continue;
+            if (line_no > end_line) break;
+
+            var code = std.ArrayList(u8).empty;
+            defer code.deinit(allocator);
+            sanitizeLine(allocator, &code, raw, lang, &state) catch continue;
+
+            const branches = countBranches(code.items);
+            if (branches > 0) {
+                result.cyclomatic += branches;
+                result.cognitive += branches * (nesting + 1);
+            }
+            const boolean_operators = countBooleanOperators(code.items);
+            result.cyclomatic += boolean_operators;
+            result.cognitive += boolean_operators;
+
+            if (langKind(lang) == .python) {
+                nesting = indentation(raw) / 4;
+            } else {
+                const updated = updateBraceDepth(nesting, code.items);
+                nesting = if (line_no == start_line and updated > 0) updated - 1 else updated;
+            }
+        }
+        result.params = countParameters(contents, start_line);
+        return result;
+    }
+
+    fn sanitizeLine(
+        allocator: Allocator,
+        output: *std.ArrayList(u8),
+        raw: []const u8,
+        lang: []const u8,
+        state: *ComplexityState,
+    ) !void {
+        const kind = langKind(lang);
+        var index: usize = 0;
+        while (index < raw.len) {
+            if (state.block_comment) {
+                if (std.mem.startsWith(u8, raw[index..], "*/")) {
+                    try appendSpaces(allocator, output, 2);
+                    state.block_comment = false;
+                    index += 2;
+                } else {
+                    try output.append(allocator, ' ');
+                    index += 1;
+                }
+                continue;
+            }
+            if (state.triple_quote != 0) {
+                if (raw[index] == state.triple_quote and
+                    index + 2 < raw.len and raw[index + 1] == state.triple_quote and raw[index + 2] == state.triple_quote)
+                {
+                    try appendSpaces(allocator, output, 3);
+                    state.triple_quote = 0;
+                    index += 3;
+                } else {
+                    try output.append(allocator, ' ');
+                    index += 1;
+                }
+                continue;
+            }
+            if (state.template) {
+                if (raw[index] == '`') {
+                    try output.append(allocator, ' ');
+                    state.template = false;
+                } else {
+                    try output.append(allocator, ' ');
+                }
+                index += 1;
+                continue;
+            }
+
+            if (kind == .python and raw[index] == '#') {
+                try appendSpaces(allocator, output, raw.len - index);
+                break;
+            }
+            if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '/') {
+                try appendSpaces(allocator, output, raw.len - index);
+                break;
+            }
+            if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '*') {
+                try appendSpaces(allocator, output, 2);
+                state.block_comment = true;
+                index += 2;
+                continue;
+            }
+            if (kind == .python and index + 2 < raw.len and
+                ((raw[index] == '"' and raw[index + 1] == '"' and raw[index + 2] == '"') or
+                    (raw[index] == '\'' and raw[index + 1] == '\'' and raw[index + 2] == '\'')))
+            {
+                try appendSpaces(allocator, output, 3);
+                state.triple_quote = raw[index];
+                index += 3;
+                continue;
+            }
+            if (kind == .js and raw[index] == '`') {
+                try output.append(allocator, ' ');
+                state.template = true;
+                index += 1;
+                continue;
+            }
+            if (raw[index] == '"' or raw[index] == '\'') {
+                const quote = raw[index];
+                try output.append(allocator, ' ');
+                index += 1;
+                while (index < raw.len) {
+                    if (raw[index] == '\\' and index + 1 < raw.len) {
+                        try appendSpaces(allocator, output, 2);
+                        index += 2;
+                    } else if (raw[index] == quote) {
+                        try output.append(allocator, ' ');
+                        index += 1;
+                        break;
+                    } else {
+                        try output.append(allocator, ' ');
+                        index += 1;
+                    }
+                }
+                continue;
+            }
+            try output.append(allocator, raw[index]);
+            index += 1;
+        }
+    }
+
+    fn appendSpaces(allocator: Allocator, output: *std.ArrayList(u8), count: usize) !void {
+        try output.appendNTimes(allocator, ' ', count);
+    }
+
+    fn countBranches(code: []const u8) u32 {
+        var count: u32 = 0;
+        var tokens = std.mem.tokenizeAny(u8, code, " \t\r\n(),{}[];");
+        while (tokens.next()) |token| {
+            if (std.mem.eql(u8, token, "if") or
+                std.mem.eql(u8, token, "for") or
+                std.mem.eql(u8, token, "while") or
+                std.mem.eql(u8, token, "case") or
+                std.mem.eql(u8, token, "catch") or
+                std.mem.eql(u8, token, "except") or
+                std.mem.eql(u8, token, "elif") or
+                std.mem.eql(u8, token, "elsif"))
+            {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    fn countBooleanOperators(code: []const u8) u32 {
+        var count: u32 = 0;
+        var index: usize = 0;
+        while (index + 1 < code.len) : (index += 1) {
+            if ((code[index] == '&' and code[index + 1] == '&') or
+                (code[index] == '|' and code[index + 1] == '|'))
+            {
+                count += 1;
+                index += 1;
+            }
+        }
+        var tokens = std.mem.tokenizeAny(u8, code, " \t\r\n(),{}[];");
+        while (tokens.next()) |token| {
+            if (std.mem.eql(u8, token, "and") or std.mem.eql(u8, token, "or")) count += 1;
+        }
+        return count;
+    }
+
+    fn updateBraceDepth(current: u32, code: []const u8) u32 {
+        var depth: i32 = @intCast(current);
+        for (code) |character| {
+            if (character == '{') {
+                depth += 1;
+            } else if (character == '}') {
+                depth -= 1;
+            }
+        }
+        return if (depth < 0) 0 else @intCast(depth);
+    }
+
+    fn countParameters(contents: []const u8, start_line: u32) u32 {
+        var line_no: u32 = 0;
+        var lines = std.mem.splitScalar(u8, contents, '\n');
+        while (lines.next()) |line| {
+            line_no += 1;
+            if (line_no != start_line) continue;
+            const open = std.mem.indexOfScalar(u8, line, '(') orelse return 0;
+            var depth: u32 = 0;
+            var close: ?usize = null;
+            var index = open;
+            while (index < line.len) : (index += 1) {
+                if (line[index] == '(') depth += 1;
+                if (line[index] == ')') {
+                    depth -= 1;
+                    if (depth == 0) {
+                        close = index;
+                        break;
+                    }
+                }
+            }
+            const end = close orelse return 0;
+            if (end <= open + 1) return 0;
+            var count: u32 = 0;
+            var part_start = open + 1;
+            index = open + 1;
+            depth = 0;
+            while (index <= end) : (index += 1) {
+                if (index == end or (line[index] == ',' and depth == 0)) {
+                    const part = std.mem.trim(u8, line[part_start..index], " \t");
+                    if (part.len > 0 and !isSelfParameter(part)) count += 1;
+                    part_start = index + 1;
+                } else if (line[index] == '(' or line[index] == '[' or line[index] == '{') {
+                    depth += 1;
+                } else if (line[index] == ')' or line[index] == ']' or line[index] == '}') {
+                    if (depth > 0) depth -= 1;
+                }
+            }
+            return count;
+        }
+        return 0;
+    }
+
+    fn isSelfParameter(part: []const u8) bool {
+        var value = std.mem.trim(u8, part, " \t");
+        if (std.mem.startsWith(u8, value, "&")) value = std.mem.trimStart(u8, value[1..], " \t");
+        if (std.mem.startsWith(u8, value, "mut ")) value = std.mem.trimStart(u8, value[4..], " \t");
+        return std.mem.eql(u8, value, "self") or
+            std.mem.startsWith(u8, value, "self:") or
+            std.mem.eql(u8, value, "this") or
+            std.mem.startsWith(u8, value, "this:");
+    }
+
     fn indentation(line: []const u8) u32 {
         var result: u32 = 0;
         for (line) |character| {
@@ -446,6 +706,53 @@ test "zig function body extent" {
     try std.testing.expectEqual(@as(u32, 6), funcs[0].end_line);
     try std.testing.expectEqual(@as(u32, 6), funcs[0].line_count);
     try std.testing.expectEqual(@as(u32, 7), funcs[1].start_line);
+}
+
+test "function complexity counts branches nesting and parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\fn classify(value: u32) u32 {
+        \\    if (value > 0) {
+        \\        if (value > 10) return 2;
+        \\    } else {
+        \\        return 1;
+        \\    }
+        \\    for (0..value) |_| {}
+        \\    return 0;
+        \\}
+    ;
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
+    try std.testing.expectEqual(@as(u32, 4), funcs[0].cyclomatic_complexity.?);
+    try std.testing.expectEqual(@as(u32, 4), funcs[0].cognitive_complexity.?);
+    try std.testing.expectEqual(@as(u32, 1), funcs[0].param_count.?);
+}
+
+test "function complexity ignores branches in comments and strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\fn describe() void {
+        \\    const text = "if (ready) for (;;)";
+        \\    // while (pending)
+        \\    /* case 1 */
+        \\}
+    ;
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
+    try std.testing.expectEqual(@as(u32, 1), funcs[0].cyclomatic_complexity.?);
+    try std.testing.expectEqual(@as(u32, 0), funcs[0].cognitive_complexity.?);
+}
+
+test "function parameters exclude borrowed self" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\fn classify(&self, value: u32) u32 {
+        \\    return value;
+        \\}
+    ;
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
+    try std.testing.expectEqual(@as(u32, 1), funcs[0].param_count.?);
 }
 
 test "rust function extraction" {

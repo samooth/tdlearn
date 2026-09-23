@@ -140,12 +140,12 @@ Prioridades:
 - [x] Eliminar el límite fijo de 32 entry points o documentarlo y probarlo.
 - [x] Añadir tests con rutas de distinta longitud, saltos, ciclos, raíces múltiples y archivos sin entry point.
 
-### [ ] METRIC-002 — Alinear Equality con la complejidad declarada
+### [x] METRIC-002 — Alinear Equality con la complejidad declarada
 
 - Referencias: `src/analysis/functions.zig:40-47`, `src/core/types.zig:88-95`, `src/metrics/equality.zig:39-50`.
-- [ ] Implementar complejidad ciclomática/cognitiva o renombrar la métrica a igualdad de tamaño de archivo.
-- [ ] Poblar los campos de complejidad o eliminar los que no se puedan calcular.
-- [ ] Añadir tests que demuestren que branches, y no solo líneas, afectan al resultado cuando aplique.
+- [x] Implementar complejidad ciclomática/cognitiva o renombrar la métrica a igualdad de tamaño de archivo.
+- [x] Poblar los campos de complejidad o eliminar los que no se puedan calcular.
+- [x] Añadir tests que demuestren que branches, y no solo líneas, afectan al resultado cuando aplique.
 
 ### [ ] METRIC-003 — Corregir redundancia, dead code y duplicados
 

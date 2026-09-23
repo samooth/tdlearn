@@ -117,7 +117,19 @@ pub fn computeHealth(
     );
 
     // 4. Complexity Gini (equality)
-    const gini = equality.computeComplexityGini(file_lines.items);
+    var complexity_values = std.ArrayList(f64).empty;
+    defer complexity_values.deinit(allocator);
+    for (file_funcs) |file| {
+        for (file.funcs) |func| {
+            if (func.cyclomatic_complexity) |complexity| {
+                try complexity_values.append(allocator, @floatFromInt(complexity));
+            }
+        }
+    }
+    const gini = if (complexity_values.items.len > 0)
+        equality.computeFunctionComplexityGini(complexity_values.items)
+    else
+        equality.computeFileSizeGini(file_lines.items);
 
     // 5. Redundancy: dead code + duplicates
     var total_funcs: u32 = 0;
@@ -288,4 +300,35 @@ test "compute_health supports more than 32 entry points" {
     };
     const report = try computeHealth(allocator, files, &edges, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 1), report.root_cause_raw.max_depth);
+}
+
+test "compute_health uses function complexity for equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const files = [_]core.types.FileNode{
+        .{ .path = "src/a.zig", .name = "a.zig", .is_dir = false, .lines = 100 },
+        .{ .path = "src/b.zig", .name = "b.zig", .is_dir = false, .lines = 100 },
+    };
+    const equal_funcs = [_]core.types.FuncInfo{
+        .{ .name = "a", .start_line = 1, .end_line = 1, .line_count = 1, .cyclomatic_complexity = 1, .is_public = true },
+        .{ .name = "b", .start_line = 1, .end_line = 1, .line_count = 1, .cyclomatic_complexity = 1, .is_public = true },
+    };
+    const uneven_funcs = [_]core.types.FuncInfo{
+        equal_funcs[0],
+        .{ .name = "b", .start_line = 1, .end_line = 1, .line_count = 1, .cyclomatic_complexity = 8, .is_public = true },
+    };
+    const equal_file_funcs = [_]dead_code.FileFuncs{
+        .{ .file = files[0].path, .contents = "pub fn a() void {}", .funcs = &equal_funcs },
+        .{ .file = files[1].path, .contents = "pub fn b() void {}", .funcs = equal_funcs[1..2] },
+    };
+    const uneven_file_funcs = [_]dead_code.FileFuncs{
+        equal_file_funcs[0],
+        .{ .file = files[1].path, .contents = "pub fn b() void {}", .funcs = uneven_funcs[1..2] },
+    };
+
+    const equal_report = try computeHealth(allocator, &files, &.{}, &.{}, &.{}, &equal_file_funcs);
+    const uneven_report = try computeHealth(allocator, &files, &.{}, &.{}, &.{}, &uneven_file_funcs);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), equal_report.root_cause_raw.complexity_gini, 0.001);
+    try std.testing.expect(uneven_report.root_cause_raw.complexity_gini > equal_report.root_cause_raw.complexity_gini);
 }

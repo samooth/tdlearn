@@ -37,17 +37,25 @@ pub fn giniCoefficient(values: []const f64) f64 {
 }
 
 /// Compute complexity Gini: inequality of cyclomatic complexity across functions.
-/// Falls back to file line counts if no CC data.
-pub fn computeComplexityGini(file_lines: []const u32) f64 {
+pub fn computeFunctionComplexityGini(complexities: []const f64) f64 {
+    return giniCoefficient(complexities);
+}
+
+/// Compute inequality of file sizes when function complexity is unavailable.
+pub fn computeFileSizeGini(file_lines: []const u32) f64 {
     if (file_lines.len <= 1) return 0.0;
 
     var values = std.ArrayList(f64).initCapacity(std.heap.page_allocator, file_lines.len) catch return 0.0;
     defer values.deinit(std.heap.page_allocator);
-    for (file_lines) |v| {
-        values.append(std.heap.page_allocator, @floatFromInt(v)) catch return 0.0;
+    for (file_lines) |value| {
+        values.append(std.heap.page_allocator, @floatFromInt(value)) catch return 0.0;
     }
 
     return giniCoefficient(values.items);
+}
+
+pub fn computeComplexityGini(file_lines: []const u32) f64 {
+    return computeFileSizeGini(file_lines);
 }
 
 // ── Tests ─────────────────────────────────────────────────────
@@ -80,6 +88,13 @@ test "gini all zeros" {
     const values = [_]f64{ 0.0, 0.0, 0.0 };
     const gini = giniCoefficient(&values);
     try std.testing.expectEqual(@as(f64, 0.0), gini);
+}
+
+test "function complexity gini responds to branches" {
+    const equal = [_]f64{ 1.0, 1.0, 1.0 };
+    const uneven = [_]f64{ 1.0, 1.0, 8.0 };
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), computeFunctionComplexityGini(&equal), 0.001);
+    try std.testing.expect(computeFunctionComplexityGini(&uneven) > 0.4);
 }
 
 test "complexity gini equal files" {
