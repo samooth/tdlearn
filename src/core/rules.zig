@@ -97,7 +97,9 @@ pub const CheckResult = struct {
 pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
     var toml = toml_mod.Toml.init(allocator);
     defer toml.deinit();
+    try validateTomlSyntax(allocator, contents);
     try toml.parse(contents);
+    try validateToml(&toml);
 
     var config = RulesConfig{};
 
@@ -178,6 +180,277 @@ pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
     }
 
     return config;
+}
+
+fn validateTomlSyntax(allocator: Allocator, contents: []const u8) !void {
+    const SeenKey = struct {
+        section: []const u8,
+        key: []const u8,
+    };
+    var seen = std.ArrayList(SeenKey).empty;
+    defer seen.deinit(allocator);
+    var current_section: []const u8 = "";
+    var array_section = false;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, stripTomlComment(raw_line), " \t\r");
+        if (line.len == 0) continue;
+
+        if (line[0] == '[') {
+            if (std.mem.startsWith(u8, line, "[[")) {
+                if (line.len < 4 or !std.mem.endsWith(u8, line, "]]")) return error.InvalidRules;
+                current_section = std.mem.trim(u8, line[2 .. line.len - 2], " \t");
+                array_section = true;
+                seen.clearRetainingCapacity();
+            } else {
+                if (line.len < 2 or !std.mem.endsWith(u8, line, "]")) return error.InvalidRules;
+                const next_section = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
+                if (!array_section and current_section.len > 0 and
+                    std.mem.eql(u8, current_section, next_section))
+                {
+                    return error.InvalidRules;
+                }
+                current_section = next_section;
+                array_section = false;
+                seen.clearRetainingCapacity();
+            }
+            continue;
+        }
+
+        const separator = findAssignment(line) orelse return error.InvalidRules;
+        const key = std.mem.trim(u8, line[0..separator], " \t");
+        const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
+        if (key.len == 0 or value.len == 0) return error.InvalidRules;
+        if (value[0] == '\'') return error.InvalidRules;
+        if (value[0] == '"' and !hasClosingQuote(value)) return error.InvalidRules;
+        if (value[0] == '[' and !hasClosingBracket(value)) return error.InvalidRules;
+
+        for (seen.items) |entry| {
+            if (std.mem.eql(u8, entry.section, current_section) and
+                std.mem.eql(u8, entry.key, key))
+            {
+                return error.InvalidRules;
+            }
+        }
+        try seen.append(allocator, .{ .section = current_section, .key = key });
+    }
+}
+
+fn stripTomlComment(line: []const u8) []const u8 {
+    var in_string = false;
+    var escaped = false;
+    for (line, 0..) |character, index| {
+        if (in_string) {
+            if (character == '\\' and !escaped) {
+                escaped = true;
+            } else {
+                if (character == '"' and !escaped) in_string = false;
+                escaped = false;
+            }
+        } else if (character == '"') {
+            in_string = true;
+        } else if (character == '#') {
+            return line[0..index];
+        }
+    }
+    return line;
+}
+
+fn findAssignment(line: []const u8) ?usize {
+    var in_string = false;
+    var escaped = false;
+    for (line, 0..) |character, index| {
+        if (in_string) {
+            if (character == '\\' and !escaped) {
+                escaped = true;
+            } else {
+                if (character == '"' and !escaped) in_string = false;
+                escaped = false;
+            }
+        } else if (character == '"') {
+            in_string = true;
+        } else if (character == '=') {
+            return index;
+        }
+    }
+    return null;
+}
+
+fn hasClosingQuote(value: []const u8) bool {
+    if (value.len < 2) return false;
+    var escaped = false;
+    for (value[1..], 1..) |character, index| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (character == '\\') {
+            escaped = true;
+        } else if (character == '"') {
+            return index + 1 == value.len;
+        }
+    }
+    return false;
+}
+
+fn hasClosingBracket(value: []const u8) bool {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (value) |character| {
+        if (in_string) {
+            if (character == '\\' and !escaped) {
+                escaped = true;
+            } else {
+                if (character == '"' and !escaped) in_string = false;
+                escaped = false;
+            }
+            continue;
+        }
+        if (character == '"') {
+            in_string = true;
+        } else if (character == '[') {
+            depth += 1;
+        } else if (character == ']') {
+            if (depth == 0) return false;
+            depth -= 1;
+        }
+    }
+    return depth == 0 and !in_string;
+}
+
+fn validateToml(toml: *const toml_mod.Toml) !void {
+    for (toml.tables.items) |*table| {
+        if (std.mem.eql(u8, table.name, "constraints")) {
+            try validateConstraints(table);
+        } else if (std.mem.eql(u8, table.name, "layers")) {
+            if (table.values.count() != 0) return error.InvalidRules;
+            try validateLayers(table);
+        } else if (std.mem.eql(u8, table.name, "boundaries")) {
+            if (table.values.count() != 0) return error.InvalidRules;
+            try validateBoundaries(table);
+        } else if (std.mem.eql(u8, table.name, "")) {
+            if (table.values.count() != 0) return error.InvalidRules;
+        } else {
+            return error.InvalidRules;
+        }
+    }
+}
+
+fn validateConstraints(table: *const toml_mod.Table) !void {
+    for (table.values.keys()) |key| {
+        const value = table.get(key).?;
+        if (isScoreKey(key)) {
+            _ = try scoreValue(value);
+        } else if (isUnsignedKey(key)) {
+            _ = try unsignedValue(value);
+        } else {
+            return error.InvalidRules;
+        }
+    }
+}
+
+fn validateLayers(table: *const toml_mod.Table) !void {
+    for (table.array_entries.items) |entry| {
+        var has_name = false;
+        var has_paths = false;
+        var has_order = false;
+        for (entry) |kv| {
+            if (std.mem.eql(u8, kv.key, "name")) {
+                if (has_name) return error.InvalidRules;
+                has_name = true;
+                _ = try nonEmptyString(kv.value);
+            } else if (std.mem.eql(u8, kv.key, "paths")) {
+                if (has_paths) return error.InvalidRules;
+                has_paths = true;
+                const values = kv.value.asArray() orelse return error.InvalidRules;
+                if (values.len == 0) return error.InvalidRules;
+                for (values) |value| _ = try nonEmptyString(value);
+            } else if (std.mem.eql(u8, kv.key, "order")) {
+                if (has_order) return error.InvalidRules;
+                has_order = true;
+                _ = try unsignedValue(kv.value);
+            } else if (!std.mem.eql(u8, kv.key, "__entry_marker__")) {
+                return error.InvalidRules;
+            }
+        }
+        if (!has_name or !has_paths or !has_order) return error.InvalidRules;
+    }
+}
+
+fn validateBoundaries(table: *const toml_mod.Table) !void {
+    for (table.array_entries.items) |entry| {
+        var has_from = false;
+        var has_to = false;
+        var has_reason = false;
+        for (entry) |kv| {
+            if (std.mem.eql(u8, kv.key, "from")) {
+                if (has_from) return error.InvalidRules;
+                has_from = true;
+                _ = try nonEmptyString(kv.value);
+            } else if (std.mem.eql(u8, kv.key, "to")) {
+                if (has_to) return error.InvalidRules;
+                has_to = true;
+                _ = try nonEmptyString(kv.value);
+            } else if (std.mem.eql(u8, kv.key, "reason")) {
+                if (has_reason) return error.InvalidRules;
+                has_reason = true;
+                if (kv.value.asString() == null) return error.InvalidRules;
+            } else if (!std.mem.eql(u8, kv.key, "__entry_marker__")) {
+                return error.InvalidRules;
+            }
+        }
+        if (!has_from or !has_to) return error.InvalidRules;
+    }
+}
+
+fn isScoreKey(key: []const u8) bool {
+    const keys = [_][]const u8{
+        "min_quality",
+        "min_modularity",
+        "min_acyclicity",
+        "min_depth",
+        "min_equality",
+        "min_redundancy",
+    };
+    for (keys) |candidate| {
+        if (std.mem.eql(u8, key, candidate)) return true;
+    }
+    return false;
+}
+
+fn isUnsignedKey(key: []const u8) bool {
+    const keys = [_][]const u8{ "max_cycles", "max_file_lines", "max_fn_lines" };
+    for (keys) |candidate| {
+        if (std.mem.eql(u8, key, candidate)) return true;
+    }
+    return false;
+}
+
+fn scoreValue(value: toml_mod.Value) !f64 {
+    const score: f64 = switch (value) {
+        .float => |number| number,
+        .integer => |number| @floatFromInt(number),
+        else => return error.InvalidRules,
+    };
+    if (!std.math.isFinite(score) or score < 0.0 or score > 1.0) return error.InvalidRules;
+    return score;
+}
+
+fn unsignedValue(value: toml_mod.Value) !u32 {
+    const number = switch (value) {
+        .integer => |integer| integer,
+        else => return error.InvalidRules,
+    };
+    if (number < 0 or number > @as(i64, std.math.maxInt(u32))) return error.InvalidRules;
+    return @intCast(number);
+}
+
+fn nonEmptyString(value: toml_mod.Value) ![]const u8 {
+    const string = value.asString() orelse return error.InvalidRules;
+    if (string.len == 0) return error.InvalidRules;
+    return string;
 }
 
 /// Check a scan against rules. Returns violations (empty = pass).
@@ -459,6 +732,45 @@ test "parse layers and boundaries" {
     try std.testing.expectEqual(@as(u32, 1), config.layers[1].order);
     try std.testing.expectEqual(@as(usize, 1), config.boundaries.len);
     try std.testing.expectEqualStrings("app must not draw", config.boundaries[0].reason);
+}
+
+test "parse rules rejects invalid values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\min_quality = 1.5
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\max_cycles = -1
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\unknown = 1
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\min_quality 0.7
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\min_quality = "0.7
+    ));
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[constraints]
+        \\min_quality = 0.7
+        \\min_quality = 0.8
+    ));
+}
+
+test "parse rules rejects incomplete layers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
+        \\[[layers]]
+        \\name = "core"
+    ));
 }
 
 test "check constraints pass" {

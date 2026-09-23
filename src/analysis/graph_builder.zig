@@ -4,6 +4,7 @@ const Io = std.Io;
 const core = @import("core");
 const imports_mod = @import("imports.zig");
 const lang_registry = @import("lang_registry.zig");
+const manifests = @import("manifests.zig");
 const resolver_mod = @import("resolver.zig");
 
 /// Build the import graph: read each source file, extract imports,
@@ -21,14 +22,15 @@ pub const GraphBuilder = struct {
         var edges = std.ArrayList(core.types.ImportEdge).empty;
         errdefer edges.deinit(allocator);
 
-        var resolver = try resolver_mod.Resolver.init(allocator, file_paths);
+        const aliases = try manifests.readPackageAliases(allocator, io, file_paths);
+        var resolver = try resolver_mod.Resolver.initWithAliases(allocator, file_paths, aliases);
         defer resolver.deinit();
 
         for (file_paths) |path| {
             const lang = detectLangFor(path);
             if (std.mem.eql(u8, lang, "unknown")) continue;
 
-            const contents = (readFile(allocator, io, path) catch null) orelse continue;
+            const contents = try readFile(allocator, io, path);
             const raw_imports = try imports_mod.ImportExtractor.extract(allocator, contents, lang);
 
             for (raw_imports) |raw| {
@@ -89,18 +91,17 @@ pub const GraphBuilder = struct {
         return "unknown";
     }
 
-    fn readFile(allocator: Allocator, io: Io, path: []const u8) !?[]const u8 {
-        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    fn readFile(allocator: Allocator, io: Io, path: []const u8) ![]const u8 {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
 
-        const stat = file.stat(io) catch return null;
-        if (stat.size == 0 or stat.size > 2 * 1024 * 1024) return null; // skip empty / >2MB
+        const stat = try file.stat(io);
+        if (stat.size > 2 * 1024 * 1024) return error.FileTooLarge;
+        if (stat.size == 0) return &.{};
 
         const buf = try allocator.alloc(u8, @intCast(stat.size));
-        const bytes_read = file.readPositionalAll(io, buf, 0) catch {
-            allocator.free(buf);
-            return null;
-        };
+        errdefer allocator.free(buf);
+        const bytes_read = try file.readPositionalAll(io, buf, 0);
         return buf[0..bytes_read];
     }
 

@@ -74,8 +74,14 @@ pub fn build(b: *std.Build) void {
     });
     const run_analysis_tests = b.addRunArtifact(analysis_tests);
 
+    const main_tests = b.addTest(.{
+        .root_module = exe_mod,
+    });
+    const run_main_tests = b.addRunArtifact(main_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_metrics_tests.step);
     test_step.dependOn(&run_analysis_tests.step);
+    test_step.dependOn(&run_main_tests.step);
 }

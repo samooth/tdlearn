@@ -63,12 +63,9 @@ pub const Walker = struct {
     }
 
     fn walkDir(self: *Walker, dir_path: []const u8, files: *std.ArrayList(core.types.FileNode)) !void {
-        var dir = std.Io.Dir.cwd().openDir(self.io, dir_path, .{
+        var dir = try std.Io.Dir.cwd().openDir(self.io, dir_path, .{
             .iterate = true,
-        }) catch |err| {
-            std.log.warn("Cannot open directory {s}: {}", .{ dir_path, err });
-            return;
-        };
+        });
         defer dir.close(self.io);
 
         var iter = dir.iterate();
@@ -96,10 +93,7 @@ pub const Walker = struct {
                     child_files.deinit(self.allocator());
                 }
 
-                self.walkDir(full_path, &child_files) catch |err| {
-                    std.log.warn("Cannot walk {s}: {}", .{ full_path, err });
-                    continue;
-                };
+                try self.walkDir(full_path, &child_files);
 
                 const mtime: i64 = blk: {
                     const stat = dir.statFile(self.io, entry.name, .{}) catch break :blk @as(i64, 0);
@@ -116,7 +110,7 @@ pub const Walker = struct {
                 });
             } else if (entry.kind == .file) {
                 // Count lines
-                const line_counts = self.countLines(full_path) catch LineCounts{};
+                const line_counts = try self.countLines(full_path);
 
                 const lang = self.registry.detectLang(name_copy);
 
@@ -145,19 +139,18 @@ pub const Walker = struct {
     /// Uses simple heuristic: blank lines have only whitespace, comment lines
     /// start with // or # or /* or --.
     fn countLines(self: *Walker, file_path: []const u8) !LineCounts {
-        const file = std.Io.Dir.cwd().openFile(self.io, file_path, .{}) catch return LineCounts{};
+        const file = try std.Io.Dir.cwd().openFile(self.io, file_path, .{});
         defer file.close(self.io);
 
-        // Read file contents
-        const stat = file.stat(self.io) catch return LineCounts{};
-        if (stat.size > 1024 * 1024) return LineCounts{}; // Skip files > 1MB
+        const stat = try file.stat(self.io);
+        if (stat.size > 1024 * 1024) return error.FileTooLarge;
+        if (stat.size == 0) return LineCounts{};
 
-        // Read into a buffer
-        const buf_size: usize = @intCast(@min(stat.size, 1024 * 1024));
+        const buf_size: usize = @intCast(stat.size);
         const buf = try self.allocator().alloc(u8, buf_size);
         defer self.allocator().free(buf);
 
-        const bytes_read = file.readPositionalAll(self.io, buf, 0) catch return LineCounts{};
+        const bytes_read = try file.readPositionalAll(self.io, buf, 0);
         const contents = buf[0..bytes_read];
 
         var total: u32 = 0;

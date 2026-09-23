@@ -3,70 +3,147 @@ const core = @import("core");
 const metrics = @import("metrics");
 const analysis = @import("analysis");
 
+const CliOptions = struct {
+    command: []const u8,
+    path: []const u8 = ".",
+    save: bool = false,
+    json: bool = false,
+};
+
 pub fn main(init: std.process.Init) !void {
-    _ = init.gpa;
-
-    // Parse args using iterator
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa) catch {
+        std.debug.print("tdlearn: unable to read arguments\n", .{});
+        std.process.exit(2);
+    };
     defer args_iter.deinit();
-    // Skip the program name (first arg)
-    _ = args_iter.next();
 
-    // Get the command (second arg)
-    const command_opt = args_iter.next();
-    if (command_opt == null) {
-        printUsage();
+    var args = std.ArrayList([]const u8).empty;
+    defer args.deinit(init.gpa);
+    _ = args_iter.skip();
+    while (args_iter.next()) |arg| {
+        try args.append(init.gpa, arg);
+    }
+
+    if (args.items.len == 0) {
+        try printUsage(init.io);
+        std.process.exit(2);
+    }
+
+    const command = args.items[0];
+    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+        if (args.items.len != 1) {
+            std.debug.print("tdlearn: --help does not accept arguments\n", .{});
+            std.process.exit(2);
+        }
+        try printUsage(init.io);
         return;
     }
-    const command = command_opt.?;
-
-    // Remaining args: path (first non-flag) and flags
-    var path: []const u8 = ".";
-    var save_flag = false;
-    var json_flag = false;
-    while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--save")) {
-            save_flag = true;
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            json_flag = true;
-        } else if (std.mem.startsWith(u8, arg, "--")) {
-            std.debug.print("Unknown flag: {s}\n", .{arg});
-        } else if (std.mem.eql(u8, path, ".")) {
-            path = arg; // first positional = path
-        } else {
-            std.debug.print("Ignoring extra argument: {s}\n", .{arg});
+    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+        if (args.items.len != 1) {
+            std.debug.print("tdlearn: --version does not accept arguments\n", .{});
+            std.process.exit(2);
         }
+        try printVersion(init.io);
+        return;
     }
 
-    if (std.mem.eql(u8, command, "scan")) {
-        try runScan(init.io, path, json_flag);
-    } else if (std.mem.eql(u8, command, "check")) {
-        try runCheck(init.io, path, json_flag);
-    } else if (std.mem.eql(u8, command, "gate")) {
-        try runGate(init.io, path, save_flag, json_flag);
-    } else if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
-        printUsage();
-    } else if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        std.debug.print("tdlearn 0.1.0\n", .{});
-    } else {
-        std.debug.print("Unknown command: {s}\n", .{command});
-        printUsage();
-        return error.InvalidCommand;
-    }
+    const options = parseOptions(command, args.items[1..]) catch |err| {
+        std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+
+    const result = if (std.mem.eql(u8, options.command, "scan"))
+        runScan(init.io, options.path, options.json)
+    else if (std.mem.eql(u8, options.command, "check"))
+        runCheck(init.io, options.path, options.json)
+    else
+        runGate(init.io, options.path, options.save, options.json);
+    result catch |err| exitForError(err);
 }
 
-fn printUsage() void {
-    std.debug.print(
+fn parseOptions(command: []const u8, args: []const []const u8) !CliOptions {
+    if (!std.mem.eql(u8, command, "scan") and
+        !std.mem.eql(u8, command, "check") and
+        !std.mem.eql(u8, command, "gate"))
+    {
+        return error.UnknownCommand;
+    }
+
+    var options = CliOptions{ .command = command };
+    var path_seen = false;
+    var save_seen = false;
+    var json_seen = false;
+    var options_done = false;
+
+    for (args) |arg| {
+        if (!options_done and std.mem.eql(u8, arg, "--")) {
+            options_done = true;
+            continue;
+        }
+
+        if (!options_done and std.mem.startsWith(u8, arg, "-")) {
+            if (std.mem.eql(u8, arg, "--save")) {
+                if (!std.mem.eql(u8, command, "gate")) return error.InvalidFlag;
+                if (save_seen) return error.DuplicateFlag;
+                save_seen = true;
+                options.save = true;
+            } else if (std.mem.eql(u8, arg, "--json")) {
+                if (json_seen) return error.DuplicateFlag;
+                json_seen = true;
+                options.json = true;
+            } else {
+                return error.UnknownFlag;
+            }
+            continue;
+        }
+
+        if (path_seen) return error.ExtraArgument;
+        if (arg.len == 0) return error.InvalidPath;
+        path_seen = true;
+        options.path = arg;
+    }
+
+    return options;
+}
+
+fn printUsage(io: std.Io) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.writeAll(
         \\tdlearn — Codebase structural quality sensor
         \\
         \\Usage:
-        \\  tdlearn scan [path]     Scan a project and print quality signal
-        \\  tdlearn check [path]    Check rules (exits 0 or 1)
-        \\  tdlearn gate [path]     Quality gate for CI
-        \\  tdlearn --help          Show this help
-        \\  tdlearn --version       Show version
+        \\  tdlearn scan [path] [--json]       Scan a project
+        \\  tdlearn check [path] [--json]      Check rules
+        \\  tdlearn gate [path] [--save] [--json]  Quality gate for CI
+        \\  tdlearn --help                      Show this help
+        \\  tdlearn --version                   Show version
         \\
-    , .{});
+    );
+    try writer.interface.flush();
+}
+
+fn printVersion(io: std.Io) !void {
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.writeAll("tdlearn 0.1.0\n");
+    try writer.interface.flush();
+}
+
+fn exitForError(err: anyerror) noreturn {
+    switch (err) {
+        error.CheckFailed, error.GateFailed => std.process.exit(1),
+        else => {
+            std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
+            std.process.exit(2);
+        },
+    }
+}
+
+fn validateRoot(io: std.Io, path: []const u8) !void {
+    if (path.len == 0) return error.InvalidPath;
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    dir.close(io);
 }
 
 fn readFileOrNull(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
@@ -154,6 +231,7 @@ const Analysis = struct {
 /// Run walker + graph builder + function extraction + health metrics.
 /// All allocations come from `arena` (caller-owned).
 fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
+    try validateRoot(io, path);
     var walker = try analysis.walker.Walker.init(arena, io, path);
     defer walker.deinit();
 
@@ -312,6 +390,7 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     const aa = arena.allocator();
+    try validateRoot(io, path);
 
     // Load rules from <path>/.tdlearn/rules.toml
     const rules_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/rules.toml", .{path});
@@ -405,6 +484,7 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     const aa = arena.allocator();
+    try validateRoot(io, path);
 
     const baseline_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/baseline.json", .{path});
 
@@ -485,4 +565,32 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     }
     std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
     return error.GateFailed;
+}
+
+test "parse options accepts flags and path" {
+    const args = [_][]const u8{ "--json", "project" };
+    const options = try parseOptions("scan", &args);
+    try std.testing.expectEqualStrings("project", options.path);
+    try std.testing.expect(options.json);
+    try std.testing.expect(!options.save);
+}
+
+test "parse options supports escaped path" {
+    const args = [_][]const u8{ "--", "-project" };
+    const options = try parseOptions("scan", &args);
+    try std.testing.expectEqualStrings("-project", options.path);
+}
+
+test "parse options rejects invalid combinations" {
+    const unknown = [_][]const u8{"--bogus"};
+    try std.testing.expectError(error.UnknownFlag, parseOptions("scan", &unknown));
+
+    const extra = [_][]const u8{ "one", "two" };
+    try std.testing.expectError(error.ExtraArgument, parseOptions("scan", &extra));
+
+    const duplicate = [_][]const u8{ "--json", "--json" };
+    try std.testing.expectError(error.DuplicateFlag, parseOptions("scan", &duplicate));
+
+    const invalid_save = [_][]const u8{"--save"};
+    try std.testing.expectError(error.InvalidFlag, parseOptions("scan", &invalid_save));
 }

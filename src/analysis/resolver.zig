@@ -1,13 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const core = @import("core");
+const manifests = @import("manifests.zig");
 
 /// Resolve raw import strings to file paths (ImportEdge).
 ///
 /// Strategy (in order):
 ///   1. Relative paths (start with ./ or ../): resolve against importing file's dir
-///   2. Exact path match with extension appended (.zig, .rs, .py, .js, .ts, .go, .c, .h)
-///   3. Package-index files: mod.rs, __init__.py, index.js map to parent dir
+///   2. Package aliases (from Cargo.toml/package.json): `tdlearn_core::analysis`
+///      → `tdlearn-core/src/lib.rs` dir + `analysis`
+///   3. Exact path match with extension appended (.zig, .rs, .py, .js, .ts, .go, .c, .h)
 ///   4. Suffix index: "core/types" matches "src/core/types.zig" (any prefix)
 ///
 /// Standard libraries ("std", "fmt", "os", external URLs) resolve to nothing.
@@ -17,15 +19,27 @@ pub const Resolver = struct {
     /// Map from module suffix → file index. "core/types" → src/core/types.zig
     /// Also registers package-index files: "core" → src/core/mod.rs
     suffix_index: std.StringHashMap(usize),
+    /// Package-name aliases: crate/package name → root source file path.
+    alias_index: std.StringHashMap([]const u8),
     /// All known file paths (borrowed).
     file_paths: []const []const u8,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, file_paths: []const []const u8) !Resolver {
+        return initWithAliases(allocator, file_paths, &.{});
+    }
+
+    pub fn initWithAliases(
+        allocator: Allocator,
+        file_paths: []const []const u8,
+        aliases: []const manifests.Alias,
+    ) !Resolver {
         var path_index = std.StringHashMap(usize).init(allocator);
         errdefer path_index.deinit();
         var suffix_index = std.StringHashMap(usize).init(allocator);
         errdefer suffix_index.deinit();
+        var alias_index = std.StringHashMap([]const u8).init(allocator);
+        errdefer alias_index.deinit();
 
         for (file_paths, 0..) |path, i| {
             try path_index.put(path, i);
@@ -59,9 +73,15 @@ pub const Resolver = struct {
             }
         }
 
+        for (aliases) |alias| {
+            // Later aliases override earlier ones
+            try alias_index.put(alias.name, alias.root_file);
+        }
+
         return .{
             .path_index = path_index,
             .suffix_index = suffix_index,
+            .alias_index = alias_index,
             .file_paths = file_paths,
             .allocator = allocator,
         };
@@ -70,6 +90,7 @@ pub const Resolver = struct {
     pub fn deinit(self: *Resolver) void {
         self.path_index.deinit();
         self.suffix_index.deinit();
+        self.alias_index.deinit();
     }
 
     /// Resolve a raw import string from `from_file`.
@@ -93,6 +114,13 @@ pub const Resolver = struct {
         // 2. Normalize :: separators (Rust) to '/'
         const normalized = normalizeSeparators(sa, raw);
         if (normalized.len == 0) return null;
+
+        // 2.5 Package alias: first path segment names a known package
+        // ("tdlearn_core/analysis" → "tdlearn-core/src/lib.rs" dir + analysis)
+        if (self.expandAlias(sa, normalized)) |expanded| {
+            if (self.matchWithExtensions(expanded)) |path| return path;
+            if (self.matchSuffixChain(expanded)) |path| return path;
+        }
 
         // 3. Exact / extension match, then suffix match on the raw module path
         if (self.matchWithExtensions(normalized)) |path| return path;
@@ -121,6 +149,22 @@ pub const Resolver = struct {
 
         // 6. Unresolved single identifiers are stdlib/external — return null.
         // Multi-segment paths (npm/go modules) also stay unresolved here.
+        return null;
+    }
+
+    fn expandAlias(self: *const Resolver, allocator: Allocator, path: []const u8) ?[]const u8 {
+        var end = path.len;
+        while (end > 0) {
+            if (self.alias_index.get(path[0..end])) |root_file| {
+                if (end == path.len) return root_file;
+                const rest = path[end + 1 ..];
+                const root_dir = core.path_utils.parentDir(root_file) orelse return null;
+                return std.mem.join(allocator, "/", &.{ root_dir, rest }) catch null;
+            }
+            const slash = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse return null;
+            if (slash == 0) return null;
+            end = slash;
+        }
         return null;
     }
 
@@ -325,6 +369,43 @@ test "python from-import resolution" {
     defer resolver.deinit();
 
     try std.testing.expectEqualStrings("mypkg/sub.py", resolver.resolve("mypkg.sub", "app.py").?);
+}
+
+test "package aliases resolve roots and subpaths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{
+        "crates/core/src/lib.rs",
+        "crates/core/src/analysis.rs",
+        "packages/left-pad/lib/main.js",
+        "packages/left-pad/lib/sub.js",
+        "vendor/acme/pkg/src/lib.rs",
+        "vendor/acme/pkg/src/feature.rs",
+    };
+    const aliases = [_]manifests.Alias{
+        .{ .name = "tdlearn_core", .root_file = paths[0] },
+        .{ .name = "left-pad", .root_file = paths[2] },
+        .{ .name = "@acme/pkg", .root_file = paths[4] },
+    };
+    var resolver = try Resolver.initWithAliases(arena.allocator(), &paths, &aliases);
+    defer resolver.deinit();
+
+    try std.testing.expectEqualStrings(
+        paths[0],
+        resolver.resolve("tdlearn_core", "app.rs").?,
+    );
+    try std.testing.expectEqualStrings(
+        paths[1],
+        resolver.resolve("tdlearn_core::analysis", "app.rs").?,
+    );
+    try std.testing.expectEqualStrings(
+        paths[3],
+        resolver.resolve("left-pad/sub", "app.js").?,
+    );
+    try std.testing.expectEqualStrings(
+        paths[5],
+        resolver.resolve("@acme/pkg/feature", "app.ts").?,
+    );
 }
 
 test "unknown import returns null" {
