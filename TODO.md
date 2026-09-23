@@ -66,7 +66,8 @@ Prioridades:
 
 - Referencias: `src/core/toml.zig:137-232`, `src/core/rules.zig:105-163`.
 - [ ] Reportar errores con línea y columna en vez de ignorar líneas o claves desconocidas.
-- [ ] Rechazar claves duplicadas, valores vacíos, comillas sin cerrar, escapes inválidos, arrays y secciones malformadas.
+- [x] Rechazar claves duplicadas, valores vacíos, comillas sin cerrar, arrays y secciones malformadas.
+- [ ] Validar escapes no soportados y reportar línea/columna.
 - [x] Rechazar tipos incorrectos y enteros fuera de rango sin truncamientos.
 - [x] Validar scores finitos dentro de `[0, 1]`.
 - [x] Exigir los campos obligatorios de layers y boundaries.

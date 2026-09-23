@@ -134,10 +134,11 @@ pub const Toml = struct {
             }
 
             // key = value
-            const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
+            const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse return error.MissingAssignment;
             const key = std.mem.trim(u8, trimmed[0..eq], " \t");
             const val_str = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-            if (key.len == 0 or val_str.len == 0) continue;
+            if (key.len == 0) return error.InvalidKey;
+            if (val_str.len == 0) return error.EmptyValue;
 
             const value = try parseValue(sa, val_str);
 
@@ -153,11 +154,15 @@ pub const Toml = struct {
                     const last = entries[entries.len - 1];
                     // Rebuild with new KV — slices are immutable, so copy
                     var list = std.ArrayList(Table.KV).empty;
-                    for (last) |kv| try list.append(sa, kv);
+                    for (last) |kv| {
+                        if (std.mem.eql(u8, kv.key, key)) return error.DuplicateKey;
+                        try list.append(sa, kv);
+                    }
                     try list.append(sa, .{ .key = key, .value = value });
                     entries[entries.len - 1] = try list.toOwnedSlice(sa);
                 }
             } else {
+                if (current_table.?.values.contains(key)) return error.DuplicateKey;
                 try current_table.?.values.put(key, value);
             }
         }
@@ -185,16 +190,33 @@ pub const Toml = struct {
     }
 
     fn parseValue(sa: Allocator, s: []const u8) !Value {
-        // String
-        if (s.len >= 2 and s[0] == '"') {
-            const end = std.mem.indexOfScalarPos(u8, s, 1, '"') orelse return Value{ .string = s };
-            return Value{ .string = s[1..end] };
+        if (s.len == 0) return error.EmptyValue;
+        if (s[0] == '"') {
+            if (s.len < 2 or s[s.len - 1] != '"') return error.UnterminatedString;
+            var escaped = false;
+            var end: ?usize = null;
+            for (s[1..], 1..) |character, index| {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (character == '\\') {
+                    escaped = true;
+                } else if (character == '"') {
+                    end = index;
+                    break;
+                }
+            }
+            const close = end orelse return error.UnterminatedString;
+            if (close != s.len - 1) return error.InvalidString;
+            return Value{ .string = s[1..close] };
         }
+        if (s[0] == '\'') return error.UnsupportedString;
         // Boolean
         if (std.mem.eql(u8, s, "true")) return Value{ .boolean = true };
         if (std.mem.eql(u8, s, "false")) return Value{ .boolean = false };
-        // Array
-        if (s.len >= 2 and s[0] == '[' and s[s.len - 1] == ']') {
+        if (s[0] == '[') {
+            if (s.len < 2 or s[s.len - 1] != ']') return error.UnterminatedArray;
             var items = std.ArrayList(Value).empty;
             var inner = s[1 .. s.len - 1];
             while (inner.len > 0) {
@@ -203,19 +225,28 @@ pub const Toml = struct {
                 // Find end of this item: quote close or comma at depth 0
                 var i: usize = 0;
                 var in_str = false;
+                var escaped = false;
                 var item_end: usize = inner.len;
                 while (i < inner.len) : (i += 1) {
                     const c = inner[i];
-                    if (c == '"') in_str = !in_str;
-                    if (c == ',' and !in_str) {
+                    if (in_str) {
+                        if (c == '\\' and !escaped) {
+                            escaped = true;
+                        } else {
+                            if (c == '"' and !escaped) in_str = false;
+                            escaped = false;
+                        }
+                    } else if (c == '"') {
+                        in_str = true;
+                    } else if (c == ',') {
                         item_end = i;
                         break;
                     }
                 }
+                if (in_str) return error.UnterminatedString;
                 const item = std.mem.trim(u8, inner[0..item_end], " \t");
-                if (item.len > 0) {
-                    try items.append(sa, try parseValue(sa, item));
-                }
+                if (item.len == 0) return error.EmptyArrayItem;
+                try items.append(sa, try parseValue(sa, item));
                 inner = if (item_end < inner.len) inner[item_end + 1 ..] else inner[inner.len..];
             }
             return Value{ .array = try items.toOwnedSlice(sa) };
@@ -228,19 +259,26 @@ pub const Toml = struct {
         if (std.fmt.parseFloat(f64, s)) |f| {
             return Value{ .float = f };
         } else |_| {}
-        // Fallback: treat as bare string
-        return Value{ .string = s };
+        return error.InvalidValue;
     }
 
     /// Strip a trailing comment from a line, respecting double quotes.
     fn stripComment(line: []const u8) []const u8 {
         var in_str = false;
+        var escaped = false;
         var i: usize = 0;
         while (i < line.len) : (i += 1) {
             const c = line[i];
-            if (c == '"') {
-                in_str = !in_str;
-            } else if (c == '#' and !in_str) {
+            if (in_str) {
+                if (c == '\\' and !escaped) {
+                    escaped = true;
+                } else {
+                    if (c == '"' and !escaped) in_str = false;
+                    escaped = false;
+                }
+            } else if (c == '"') {
+                in_str = true;
+            } else if (c == '#') {
                 return line[0..i];
             }
         }
@@ -370,14 +408,22 @@ test "negative numbers" {
     try std.testing.expectApproxEqAbs(@as(f64, -0.5), root.get("y").?.asFloat().?, 0.001);
 }
 
-test "override duplicate keys" {
+test "reject malformed assignments" {
     var toml = Toml.init(std.testing.allocator);
     defer toml.deinit();
-    try toml.parse(
+    try std.testing.expectError(error.MissingAssignment, toml.parse("value"));
+    try std.testing.expectError(error.EmptyValue, toml.parse("key ="));
+    try std.testing.expectError(error.UnterminatedString, toml.parse("key = \"value"));
+    try std.testing.expectError(error.UnterminatedArray, toml.parse("key = [1, 2"));
+    try std.testing.expectError(error.InvalidValue, toml.parse("key = value"));
+}
+
+test "reject duplicate keys" {
+    var toml = Toml.init(std.testing.allocator);
+    defer toml.deinit();
+    try std.testing.expectError(error.DuplicateKey, toml.parse(
         \\[a]
         \\k = 1
         \\k = 2
-    );
-    const a = toml.table("a").?;
-    try std.testing.expectEqual(@as(i64, 2), a.get("k").?.asInt().?);
+    ));
 }
