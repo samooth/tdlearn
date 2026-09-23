@@ -55,25 +55,40 @@ pub fn computeHealth(
     );
 
     // 2. Cycle detection (acyclicity)
-    // Build node-indexed edges for Tarjan
+    // Build node-indexed edges for cycle detection and depth. Acyclicity uses
+    // the union of imports, calls, and inheritance; depth remains import-only.
     var node_index = std.StringHashMap(usize).init(allocator);
     defer node_index.deinit();
     for (file_paths.items, 0..) |path, i| {
+        if (node_index.contains(path)) return error.DuplicateNode;
         _ = try node_index.put(path, i);
     }
 
-    var tarjan_edges = std.ArrayList(core.types.GraphEdge).empty;
-    defer tarjan_edges.deinit(allocator);
+    var cycle_edges = std.ArrayList(core.types.GraphEdge).empty;
+    defer cycle_edges.deinit(allocator);
+    var depth_edges = std.ArrayList(core.types.GraphEdge).empty;
+    defer depth_edges.deinit(allocator);
     for (import_edges) |edge| {
-        const from_id = node_index.get(edge.from_file) orelse continue;
-        const to_id = node_index.get(edge.to_file) orelse continue;
-        try tarjan_edges.append(allocator, .{ .from = from_id, .to = to_id });
+        const from_id = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
+        const to_id = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
+        try cycle_edges.append(allocator, .{ .from = from_id, .to = to_id });
+        try depth_edges.append(allocator, .{ .from = from_id, .to = to_id });
+    }
+    for (call_edges) |edge| {
+        const from_id = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
+        const to_id = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
+        try cycle_edges.append(allocator, .{ .from = from_id, .to = to_id });
+    }
+    for (inherit_edges) |edge| {
+        const from_id = node_index.get(edge.child_file) orelse return error.InvalidGraphEdge;
+        const to_id = node_index.get(edge.parent_file) orelse return error.InvalidGraphEdge;
+        try cycle_edges.append(allocator, .{ .from = from_id, .to = to_id });
     }
 
     const cycle_count = try acyclicity.detectCycles(
         allocator,
         file_paths.items,
-        tarjan_edges.items,
+        cycle_edges.items,
     );
 
     // 3. Depth from entry points
@@ -114,7 +129,7 @@ pub fn computeHealth(
         allocator,
         file_paths.items.len,
         entry_points.items,
-        tarjan_edges.items,
+        depth_edges.items,
     );
 
     // 4. Complexity Gini (equality)
@@ -339,4 +354,55 @@ test "compute_health does not reward missing function data" {
     const report = try computeHealth(arena.allocator(), &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(f64, 1.0), report.root_cause_raw.redundancy_ratio);
     try std.testing.expectEqual(@as(f64, 0.0), report.root_cause_scores.redundancy);
+}
+
+test "compute_health detects cycles in call and inheritance unions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const files = [_]core.types.FileNode{
+        .{ .path = "src/a.zig", .name = "a.zig", .is_dir = false, .lines = 1 },
+        .{ .path = "src/b.zig", .name = "b.zig", .is_dir = false, .lines = 1 },
+    };
+    const calls = [_]core.types.CallEdge{
+        .{ .from_file = files[0].path, .from_func = "a", .to_file = files[1].path, .to_func = "b" },
+        .{ .from_file = files[1].path, .from_func = "b", .to_file = files[0].path, .to_func = "a" },
+    };
+    const call_report = try computeHealth(allocator, &files, &.{}, &calls, &.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 1), call_report.root_cause_raw.cycle_count);
+
+    const inheritance = [_]core.types.InheritEdge{
+        .{ .child_file = files[0].path, .child_class = "A", .parent_file = files[1].path, .parent_class = "B" },
+        .{ .child_file = files[1].path, .child_class = "B", .parent_file = files[0].path, .parent_class = "A" },
+    };
+    const inheritance_report = try computeHealth(allocator, &files, &.{}, &.{}, &inheritance, &.{});
+    try std.testing.expectEqual(@as(u32, 1), inheritance_report.root_cause_raw.cycle_count);
+}
+
+test "compute_health rejects unknown graph endpoints" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const files = [_]core.types.FileNode{
+        .{ .path = "src/a.zig", .name = "a.zig", .is_dir = false, .lines = 1 },
+    };
+    const imports = [_]core.types.ImportEdge{
+        .{ .from_file = files[0].path, .to_file = "src/missing.zig" },
+    };
+    try std.testing.expectError(
+        error.InvalidGraphEdge,
+        computeHealth(arena.allocator(), &files, &imports, &.{}, &.{}, &.{}),
+    );
+}
+
+test "compute_health rejects duplicate file nodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const files = [_]core.types.FileNode{
+        .{ .path = "src/a.zig", .name = "a.zig", .is_dir = false, .lines = 1 },
+        .{ .path = "src/a.zig", .name = "a.zig", .is_dir = false, .lines = 1 },
+    };
+    try std.testing.expectError(
+        error.DuplicateNode,
+        computeHealth(arena.allocator(), &files, &.{}, &.{}, &.{}, &.{}),
+    );
 }

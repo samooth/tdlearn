@@ -157,14 +157,14 @@ Prioridades:
 - [x] Manejar comentarios, strings, cuerpos grandes, funciones anidadas y solapamientos.
 - [x] No premiar la ausencia de datos como si fuera cero redundancia; definir una política para proyectos sin funciones.
 
-### [ ] METRIC-004 — Validar ciclos y aristas de modularidad
+### [x] METRIC-004 — Validar ciclos y aristas de modularidad
 
-- Referencias: `src/metrics/acyclicity.zig:5-132`, `src/metrics/modularity.zig:25-125`, `src/metrics/mod.zig:64-75`.
-- [ ] Decidir y probar si self-loops cuentan como ciclos.
-- [ ] Definir si acyclicity usa imports o la unión de imports, llamadas y herencia.
-- [ ] Rechazar o contabilizar aristas con endpoints desconocidos.
-- [ ] Documentar la partición usada por Newman y comportamiento de multigraphs, duplicados y grafo vacío.
-- [ ] Hacer las métricas deterministas y evitar sesgos por orden de archivos.
+- Referencias: `src/metrics/acyclicity.zig:5-225`, `src/metrics/modularity.zig:5-260`, `src/metrics/mod.zig:57-100`.
+- [x] Decidir y probar si self-loops cuentan como ciclos.
+- [x] Definir si acyclicity usa imports o la unión de imports, llamadas y herencia.
+- [x] Rechazar o contabilizar aristas con endpoints desconocidos.
+- [x] Documentar la partición usada por Newman y comportamiento de multigraphs, duplicados y grafo vacío.
+- [x] Hacer las métricas deterministas y evitar sesgos por orden de archivos.
 
 ## P1 — configuración, CLI y persistencia
 

@@ -3,15 +3,19 @@ const Allocator = std.mem.Allocator;
 const core = @import("core");
 
 /// Tarjan's Strongly Connected Components algorithm.
-/// Finds cycles in the dependency graph.
-///
-/// Returns the number of circular dependencies (SCCs with size > 1).
+/// Finds cycles in the dependency graph. Self-loops are intentionally not
+/// counted; only SCCs containing at least two nodes are circular dependencies.
+/// Edge endpoints must belong to `nodes`; unknown endpoints return
+/// `error.InvalidGraphEdge`.
 pub fn detectCycles(
     allocator: Allocator,
     nodes: []const []const u8,
     edges: []const core.types.GraphEdge,
 ) !u32 {
     const n = nodes.len;
+    for (edges) |edge| {
+        if (edge.from >= n or edge.to >= n) return error.InvalidGraphEdge;
+    }
     if (n == 0) return 0;
 
     // Build adjacency list
@@ -162,6 +166,42 @@ test "self-loop" {
     const count = try detectCycles(std.testing.allocator, &nodes, &edges);
     // Self-loop is an SCC of size 1, not counted as a cycle
     try std.testing.expectEqual(@as(u32, 0), count);
+}
+
+test "invalid graph edge is rejected" {
+    const nodes = [_][]const u8{"a"};
+    const edges = [_]core.types.GraphEdge{.{ .from = 0, .to = 1 }};
+    try std.testing.expectError(error.InvalidGraphEdge, detectCycles(std.testing.allocator, &nodes, &edges));
+}
+
+test "duplicate edges do not multiply cycle count" {
+    const nodes = [_][]const u8{ "a", "b" };
+    const edges = [_]core.types.GraphEdge{
+        .{ .from = 0, .to = 1 },
+        .{ .from = 0, .to = 1 },
+        .{ .from = 1, .to = 0 },
+        .{ .from = 1, .to = 0 },
+    };
+    const count = try detectCycles(std.testing.allocator, &nodes, &edges);
+    try std.testing.expectEqual(@as(u32, 1), count);
+}
+
+test "cycle count is independent of edge order" {
+    const nodes = [_][]const u8{ "a", "b", "c" };
+    const forward = [_]core.types.GraphEdge{
+        .{ .from = 0, .to = 1 },
+        .{ .from = 1, .to = 2 },
+        .{ .from = 2, .to = 0 },
+    };
+    const reverse = [_]core.types.GraphEdge{
+        .{ .from = 2, .to = 0 },
+        .{ .from = 1, .to = 2 },
+        .{ .from = 0, .to = 1 },
+    };
+    try std.testing.expectEqual(
+        try detectCycles(std.testing.allocator, &nodes, &forward),
+        try detectCycles(std.testing.allocator, &nodes, &reverse),
+    );
 }
 
 test "two separate cycles" {

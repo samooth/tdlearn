@@ -6,15 +6,19 @@ A codebase structural quality sensor written in Zig.
 
 tdlearn computes five root cause metrics from your source code and produces a single quality signal (0–10000):
 
-- **Modularity** — Newman's Q on the import graph
-- **Acyclicity** — Tarjan's SCC cycle detection
-- **Depth** — longest simple path from entry points (conventional entry files:
-  `main.*`, `index.*`, `build.zig`, `__main__.py`, ...; falls back to
-  files with no incoming imports)
-- **Equality** — Gini coefficient on file complexity
-- **Redundancy** — dead code + duplicate function detection
+- **Modularity** — Newman's Q using a preassigned directory-module partition;
+  import, call, and inheritance edges are retained as a weighted multigraph
+- **Acyclicity** — Tarjan's SCC cycle detection on the union of import, call,
+  and inheritance edges; self-loops are excluded
+- **Depth** — longest simple path from entry points in the import graph
+  (conventional entry files: `main.*`, `index.*`, `build.zig`, `__main__.py`,
+  ...; falls back to files with no incoming imports)
+- **Equality** — Gini coefficient on function complexity, with file-size
+  fallback when no function data exists
+- **Redundancy** — reachable dead code + exact normalized duplicate detection;
+  no function data is treated conservatively as ratio `1.0`
 
-Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies. The import, call, and inheritance graphs all feed the modularity metric.
+Imports, functions, calls, and inheritance are extracted line-based for Zig, Rust, Python, JavaScript/TypeScript, Go, and C/C++ — no tree-sitter, no external dependencies.
 
 ## Build
 
