@@ -881,6 +881,20 @@ test "temporary invalid rules are rejected before output" {
     try std.testing.expectError(error.InvalidRules, evaluateCheck(arena.allocator(), io, project_path));
 }
 
+test "temporary command helpers return typed setup errors" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
+    src_dir.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.NoRulesFile, evaluateCheck(arena.allocator(), io, project_path));
+    try std.testing.expectError(error.NoBaseline, compareGate(arena.allocator(), io, project_path));
+}
+
 test "filter source paths excludes non-source files" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
