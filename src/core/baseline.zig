@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 /// `gate --save` writes the current metrics; `gate` compares a fresh
 /// scan against the saved baseline and fails on regression.
 pub const Baseline = struct {
+    schema_version: u32 = 1,
     quality_signal: f64 = 0.0,
     cycle_count: u32 = 0,
     max_depth: u32 = 0,
@@ -14,6 +15,13 @@ pub const Baseline = struct {
     duplicate_functions: u32 = 0,
 
     pub const degradation_tolerance = 0.02;
+
+    pub fn validate(self: Baseline) !void {
+        if (self.schema_version != 1) return error.UnsupportedBaselineSchema;
+        if (!std.math.isFinite(self.quality_signal) or self.quality_signal < 0.0 or self.quality_signal > 1.0) {
+            return error.InvalidBaseline;
+        }
+    }
 
     /// Compare current metrics against this baseline.
     /// Returns a list of degradation descriptions (empty = no regression).
@@ -63,6 +71,7 @@ pub const Baseline = struct {
 
 /// Serialize a baseline to pretty JSON.
 pub fn writeBaseline(allocator: Allocator, baseline: Baseline) ![]u8 {
+    try baseline.validate();
     return std.json.Stringify.valueAlloc(allocator, baseline, .{ .whitespace = .indent_2 });
 }
 
@@ -70,6 +79,7 @@ pub fn writeBaseline(allocator: Allocator, baseline: Baseline) ![]u8 {
 pub fn readBaseline(allocator: Allocator, contents: []const u8) !Baseline {
     var parsed = try std.json.parseFromSlice(Baseline, allocator, contents, .{});
     defer parsed.deinit();
+    try parsed.value.validate();
     return parsed.value;
 }
 
@@ -157,6 +167,23 @@ test "improvements are not violations" {
     };
     const violations = try before.diff(after, arena.allocator());
     try std.testing.expectEqual(@as(usize, 0), violations.len);
+}
+
+test "baseline rejects invalid schema and score" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.UnsupportedBaselineSchema, readBaseline(
+        arena.allocator(),
+        "{\"schema_version\": 2, \"quality_signal\": 0.5}",
+    ));
+    try std.testing.expectError(error.InvalidBaseline, readBaseline(
+        arena.allocator(),
+        "{\"schema_version\": 1, \"quality_signal\": 1.5}",
+    ));
+    try std.testing.expectError(error.InvalidBaseline, writeBaseline(
+        arena.allocator(),
+        .{ .quality_signal = -0.1 },
+    ));
 }
 
 test "parse legacy/baseline json with missing fields" {

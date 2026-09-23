@@ -197,9 +197,10 @@ Prioridades:
 ### [ ] BASELINE-001 — Hacer robusto el baseline y su persistencia
 
 - Referencias: `src/core/baseline.zig:12-70`, `src/main.zig:411-466`.
-- [ ] Añadir versión de schema y migración explícita.
-- [ ] Validar scores finitos, contadores y tolerancias; definir la semántica de `total_functions`.
-- [ ] Escribir mediante archivo temporal y renombrado atómico, sin truncar un baseline válido.
+- [x] Añadir versión de schema y compatibilidad con el formato existente.
+- [x] Validar scores finitos dentro de `[0, 1]`.
+- [ ] Validar contadores y tolerancias; definir la semántica de `total_functions`.
+- [x] Escribir mediante archivo temporal y renombrado atómico, sin truncar un baseline válido.
 - [ ] Manejar baseline ausente, truncado, corrupto, de versión futura y escritura fallida.
 - [ ] Actualizar `.tdlearn/baseline.json` solo después de estabilizar el análisis y sus tests.
 

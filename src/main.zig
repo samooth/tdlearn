@@ -548,11 +548,14 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
 
         // Ensure .tdlearn dir exists
         const dir_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn", .{path});
-        std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+        try std.Io.Dir.cwd().createDirPath(io, dir_path);
 
-        const file = try std.Io.Dir.cwd().createFile(io, baseline_path, .{});
+        const temp_path = try std.fmt.allocPrint(aa, "{s}.tmp", .{baseline_path});
+        const file = try std.Io.Dir.cwd().createFile(io, temp_path, .{});
+        errdefer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
         defer file.close(io);
         try file.writePositionalAll(io, json, 0);
+        try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), baseline_path, io);
 
         if (json_flag) {
             const payload = JsonGateSave{
