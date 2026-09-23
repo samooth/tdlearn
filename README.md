@@ -106,8 +106,11 @@ All commands accept `--json` for machine-readable output on stdout:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "tool_version": "0.1.0",
+  "ok": true,
+  "root": ".",
+  "units": { "quality_signal": "0-10000", "line_counts": "lines", "edge_counts": "edges" },
   "quality_signal": 7684,
   "bottleneck": "equality",
   "files": 31,
@@ -117,6 +120,10 @@ All commands accept `--json` for machine-readable output on stdout:
   "root_causes": { "modularity": 5870, "acyclicity": 10000, ... }
 }
 ```
+
+Errores JSON usan el mismo schema y un envelope `ok: false` con
+`error_info.code`, `category` y `message`. `gate` incluye las métricas
+`baseline` y `current`.
 
 ## Architecture
 

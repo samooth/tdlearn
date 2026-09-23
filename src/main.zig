@@ -3,7 +3,7 @@ const core = @import("core");
 const metrics = @import("metrics");
 const analysis = @import("analysis");
 
-const json_schema_version: u32 = 1;
+const json_schema_version: u32 = 2;
 const tool_version = "0.1.0";
 
 const CliOptions = struct {
@@ -35,7 +35,11 @@ pub fn main(init: std.process.Init) !void {
     const command = args.items[0];
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         if (args.items.len != 1) {
-            std.debug.print("tdlearn: --help does not accept arguments\n", .{});
+            if (hasJsonFlag(args.items[1..])) {
+                printJsonError(init.io, init.gpa, error.ExtraArgument) catch {};
+            } else {
+                std.debug.print("tdlearn: --help does not accept arguments\n", .{});
+            }
             std.process.exit(2);
         }
         try printUsage(init.io);
@@ -43,7 +47,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
         if (args.items.len != 1) {
-            std.debug.print("tdlearn: --version does not accept arguments\n", .{});
+            if (hasJsonFlag(args.items[1..])) {
+                printJsonError(init.io, init.gpa, error.ExtraArgument) catch {};
+            } else {
+                std.debug.print("tdlearn: --version does not accept arguments\n", .{});
+            }
             std.process.exit(2);
         }
         try printVersion(init.io);
@@ -51,7 +59,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const options = parseOptions(command, args.items[1..]) catch |err| {
-        std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
+        if (hasJsonFlag(args.items[1..])) {
+            printJsonError(init.io, init.gpa, err) catch {};
+        } else {
+            std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(2);
     };
 
@@ -61,7 +73,15 @@ pub fn main(init: std.process.Init) !void {
         runCheck(init.io, options.path, options.json)
     else
         runGate(init.io, options.path, options.save, options.json);
-    result catch |err| exitForError(err);
+    result catch |err| exitForError(init.io, init.gpa, err, options.json);
+}
+
+fn hasJsonFlag(args: []const []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--")) return false;
+        if (std.mem.eql(u8, arg, "--json")) return true;
+    }
+    return false;
 }
 
 fn parseOptions(command: []const u8, args: []const []const u8) !CliOptions {
@@ -133,14 +153,19 @@ fn printVersion(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-fn exitForError(err: anyerror) noreturn {
+fn exitForError(io: std.Io, allocator: std.mem.Allocator, err: anyerror, json_flag: bool) noreturn {
     switch (err) {
-        error.CheckFailed, error.GateFailed => std.process.exit(1),
+        error.CheckFailed, error.GateFailed, error.NoRulesFile, error.NoBaseline => {},
         else => {
-            std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
-            std.process.exit(2);
+            if (json_flag) {
+                printJsonError(io, allocator, err) catch {};
+            } else {
+                std.debug.print("tdlearn: {s}\n", .{@errorName(err)});
+            }
         },
     }
+    if (err == error.CheckFailed or err == error.GateFailed) std.process.exit(1);
+    std.process.exit(2);
 }
 
 fn validateRoot(io: std.Io, path: []const u8) !void {
@@ -173,9 +198,40 @@ const JsonRootCauses = struct {
     redundancy: u32,
 };
 
+const JsonUnits = struct {
+    quality_signal: []const u8,
+    line_counts: []const u8,
+    edge_counts: []const u8,
+};
+
+const JsonGateMetrics = struct {
+    quality_signal: u32,
+    cycle_count: u32,
+    max_depth: u32,
+    total_functions: u32,
+    dead_functions: u32,
+    duplicate_functions: u32,
+};
+
+const JsonErrorDetails = struct {
+    code: []const u8,
+    category: []const u8,
+    message: []const u8,
+};
+
+const JsonError = struct {
+    schema_version: u32,
+    tool_version: []const u8,
+    ok: bool,
+    error_info: JsonErrorDetails,
+};
+
 const JsonScan = struct {
     schema_version: u32,
     tool_version: []const u8,
+    ok: bool,
+    root: []const u8,
+    units: JsonUnits,
     quality_signal: u32,
     bottleneck: []const u8,
     files: u32,
@@ -192,6 +248,9 @@ const JsonScan = struct {
 const JsonCheck = struct {
     schema_version: u32,
     tool_version: []const u8,
+    ok: bool,
+    root: []const u8,
+    units: JsonUnits,
     pass: bool,
     rules_checked: u32,
     quality_signal: u32,
@@ -209,17 +268,25 @@ const JsonViolation = struct {
 const JsonGate = struct {
     schema_version: u32,
     tool_version: []const u8,
+    ok: bool,
+    root: []const u8,
+    units: JsonUnits,
     pass: bool,
     quality_signal: u32,
-    baseline_quality: u32,
+    baseline: JsonGateMetrics,
+    current: JsonGateMetrics,
     violations: []const []const u8,
 };
 
 const JsonGateSave = struct {
     schema_version: u32,
     tool_version: []const u8,
+    ok: bool,
+    root: []const u8,
+    units: JsonUnits,
     saved: bool,
     quality_signal: u32,
+    metrics: JsonGateMetrics,
 };
 
 fn scoreInt(score: f64) u32 {
@@ -234,6 +301,64 @@ fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !
     try stdout_writer.interface.writeAll(json);
     try stdout_writer.interface.writeAll("\n");
     try stdout_writer.interface.flush();
+}
+
+fn jsonUnits() JsonUnits {
+    return .{
+        .quality_signal = "0-10000",
+        .line_counts = "lines",
+        .edge_counts = "edges",
+    };
+}
+
+fn gateMetricsFromReport(report: metrics.HealthReport) JsonGateMetrics {
+    return .{
+        .quality_signal = report.quality_signal_int,
+        .cycle_count = report.root_cause_raw.cycle_count,
+        .max_depth = report.root_cause_raw.max_depth,
+        .total_functions = report.total_functions,
+        .dead_functions = report.dead_functions,
+        .duplicate_functions = report.duplicate_functions,
+    };
+}
+
+fn gateMetricsFromBaseline(baseline: core.baseline.Baseline) JsonGateMetrics {
+    return .{
+        .quality_signal = @intFromFloat(@max(0.0, @min(1.0, baseline.quality_signal)) * 10000.0),
+        .cycle_count = baseline.cycle_count,
+        .max_depth = baseline.max_depth,
+        .total_functions = baseline.total_functions,
+        .dead_functions = baseline.dead_functions,
+        .duplicate_functions = baseline.duplicate_functions,
+    };
+}
+
+fn printJsonError(io: std.Io, allocator: std.mem.Allocator, err: anyerror) !void {
+    const code = @errorName(err);
+    const payload = JsonError{
+        .schema_version = json_schema_version,
+        .tool_version = tool_version,
+        .ok = false,
+        .error_info = .{
+            .code = code,
+            .category = errorCategory(code),
+            .message = code,
+        },
+    };
+    try printJsonStdout(io, allocator, payload);
+}
+
+fn errorCategory(code: []const u8) []const u8 {
+    const usage_errors = [_][]const u8{ "UnknownCommand", "UnknownFlag", "InvalidFlag", "DuplicateFlag", "ExtraArgument", "InvalidPath" };
+    for (usage_errors) |candidate| {
+        if (std.mem.eql(u8, code, candidate)) return "usage";
+    }
+    const config_errors = [_][]const u8{ "InvalidRules", "UnsupportedBaselineSchema", "InvalidBaseline", "NoRulesFile" };
+    for (config_errors) |candidate| {
+        if (std.mem.eql(u8, code, candidate)) return "configuration";
+    }
+    if (std.mem.eql(u8, code, "NoBaseline")) return "baseline";
+    return "analysis";
 }
 
 /// Full analysis result shared by scan/check/gate commands.
@@ -362,6 +487,9 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
         const payload = JsonScan{
             .schema_version = json_schema_version,
             .tool_version = tool_version,
+            .ok = true,
+            .root = path,
+            .units = jsonUnits(),
             .quality_signal = report.quality_signal_int,
             .bottleneck = report.bottleneck,
             .files = report.file_count,
@@ -435,15 +563,7 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     const rules_path = try std.fmt.allocPrint(aa, "{s}/.tdlearn/rules.toml", .{path});
     const rules_contents = readFileOrNull(aa, io, rules_path) orelse {
         if (json_flag) {
-            const payload = JsonCheck{
-                .schema_version = json_schema_version,
-                .tool_version = tool_version,
-                .pass = false,
-                .rules_checked = 0,
-                .quality_signal = 0,
-                .violations = &.{},
-            };
-            try printJsonStdout(io, aa, payload);
+            try printJsonError(io, aa, error.NoRulesFile);
         } else {
             std.debug.print("No rules file at {s} — nothing to check.\n", .{rules_path});
             std.debug.print("Create .tdlearn/rules.toml to define constraints.\n", .{});
@@ -492,6 +612,9 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
         const payload = JsonCheck{
             .schema_version = json_schema_version,
             .tool_version = tool_version,
+            .ok = check.pass(),
+            .root = path,
+            .units = jsonUnits(),
             .pass = check.pass(),
             .rules_checked = check.rules_checked,
             .quality_signal = report.quality_signal_int,
@@ -561,8 +684,12 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
             const payload = JsonGateSave{
                 .schema_version = json_schema_version,
                 .tool_version = tool_version,
+                .ok = true,
+                .root = path,
+                .units = jsonUnits(),
                 .saved = true,
                 .quality_signal = result.report.quality_signal_int,
+                .metrics = gateMetricsFromReport(result.report),
             };
             try printJsonStdout(io, aa, payload);
             return;
@@ -576,8 +703,12 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
 
     // Compare mode: load baseline, rescan, diff
     const baseline_contents = readFileOrNull(aa, io, baseline_path) orelse {
-        std.debug.print("No baseline at {s}\n", .{baseline_path});
-        std.debug.print("Run 'tdlearn gate --save' first to create one.\n", .{});
+        if (json_flag) {
+            try printJsonError(io, aa, error.NoBaseline);
+        } else {
+            std.debug.print("No baseline at {s}\n", .{baseline_path});
+            std.debug.print("Run 'tdlearn gate --save' first to create one.\n", .{});
+        }
         return error.NoBaseline;
     };
     const saved = try core.baseline.readBaseline(aa, baseline_contents);
@@ -598,9 +729,13 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
         const payload = JsonGate{
             .schema_version = json_schema_version,
             .tool_version = tool_version,
+            .ok = violations.len == 0,
+            .root = path,
+            .units = jsonUnits(),
             .pass = violations.len == 0,
             .quality_signal = result.report.quality_signal_int,
-            .baseline_quality = @intFromFloat(saved.quality_signal * 10000),
+            .baseline = gateMetricsFromBaseline(saved),
+            .current = gateMetricsFromReport(result.report),
             .violations = violations,
         };
         try printJsonStdout(io, aa, payload);
@@ -643,6 +778,34 @@ test "filter source paths excludes non-source files" {
     try std.testing.expectEqualStrings("src/main.zig", source_paths[0]);
     try std.testing.expectEqualStrings("src/app.py", source_paths[1]);
     try std.testing.expectEqualStrings("src/types.ts", source_paths[2]);
+}
+
+test "json error envelope has stable fields" {
+    const payload = JsonError{
+        .schema_version = json_schema_version,
+        .tool_version = tool_version,
+        .ok = false,
+        .error_info = .{
+            .code = "InvalidRules",
+            .category = "configuration",
+            .message = "InvalidRules",
+        },
+    };
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, payload, .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"category\":\"configuration\"") != null);
+}
+
+test "json payloads expose root and units" {
+    try std.testing.expectEqualStrings("0-10000", jsonUnits().quality_signal);
+    try std.testing.expectEqualStrings("lines", jsonUnits().line_counts);
+    try std.testing.expectEqualStrings("edges", jsonUnits().edge_counts);
+    try std.testing.expect(hasJsonFlag(&[_][]const u8{ "path", "--json" }));
+    try std.testing.expect(!hasJsonFlag(&[_][]const u8{ "--", "--json" }));
+    try std.testing.expectEqualStrings("usage", errorCategory("UnknownFlag"));
+    try std.testing.expectEqualStrings("baseline", errorCategory("NoBaseline"));
 }
 
 test "parse options accepts flags and path" {

@@ -188,17 +188,17 @@ Prioridades:
 - [x] Implementar o corregir la convención de `mod.rs` y entry points.
 - [x] Añadir tests portables de Unicode, traversal y separadores; la ejecución multi-OS queda en TEST-001.
 
-### [ ] JSON-001 — Versionar y estabilizar la salida JSON
+### [x] JSON-001 — Versionar y estabilizar la salida JSON
 
-- Referencias: `src/main.zig:87-126,318-487`, `README.md:95-109`.
+- Referencias: `src/main.zig:6-360,545-790`, `README.md:103-130`.
 - [x] Añadir `schema_version` y versión de herramienta.
-- [ ] Añadir root y unidades.
+- [x] Añadir root y unidades.
 - [x] Incluir archivos asociados, rule, severidad, `from` y `to` donde existan.
-- [ ] Incluir métricas anterior/nueva donde existan.
-- [ ] Definir un envelope único para errores de uso, configuración, I/O y baseline.
+- [x] Incluir métricas anterior/nueva donde existan.
+- [x] Definir un envelope único para errores de uso, configuración, I/O y baseline.
 - [x] Emitir JSON para `gate --save --json`.
-- [ ] Emitir JSON para fallos de configuración.
-- [ ] Añadir golden tests y asegurar que el JSON exitoso no escribe diagnósticos en stdout.
+- [x] Emitir JSON para fallos de configuración.
+- [x] Añadir golden tests y asegurar que el JSON exitoso no escribe diagnósticos en stdout.
 
 ### [ ] BASELINE-001 — Hacer robusto el baseline y su persistencia
 
