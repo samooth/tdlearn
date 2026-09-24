@@ -103,23 +103,38 @@ pub const InheritGraphBuilder = struct {
             try gop.value_ptr.*.append(allocator, edge.to_file);
         }
 
-        // Resolve bases
+        try appendResolvedEdges(
+            allocator,
+            file_classes,
+            &class_index,
+            &imports_by_file,
+            &edges,
+            &edge_set,
+        );
+
+        return try edges.toOwnedSlice(allocator);
+    }
+
+    fn appendResolvedEdges(
+        allocator: Allocator,
+        file_classes: []const FileClasses,
+        class_index: *const std.StringHashMap(*std.ArrayList([]const u8)),
+        imports_by_file: *const std.StringHashMap(*std.ArrayList([]const u8)),
+        edges: *std.ArrayList(core.types.InheritEdge),
+        edge_set: *EdgeSet,
+    ) !void {
         for (file_classes) |fc| {
             const imported = imports_by_file.get(fc.file);
             for (fc.classes) |cls| {
                 const bases = cls.bases orelse continue;
                 for (bases) |base| {
                     const candidates = class_index.get(base) orelse continue;
-
                     for (candidates.items) |cand_file| {
-                        // 1. Same-file inheritance — skip
                         if (std.mem.eql(u8, cand_file, fc.file)) continue;
-
-                        // 2. Imported file — edge
                         if (imported) |imp| {
                             for (imp.items) |imp_file| {
                                 if (std.mem.eql(u8, imp_file, cand_file)) {
-                                    try appendEdge(allocator, &edges, &edge_set, .{
+                                    try appendEdge(allocator, edges, edge_set, .{
                                         .child_file = fc.file,
                                         .child_class = cls.name,
                                         .parent_file = cand_file,
@@ -131,12 +146,10 @@ pub const InheritGraphBuilder = struct {
                             continue;
                         }
                     }
-
-                    // 3. Unique project-wide definition
                     if (candidates.items.len == 1) {
                         const cand_file = candidates.items[0];
                         if (std.mem.eql(u8, cand_file, fc.file)) continue;
-                        try appendEdge(allocator, &edges, &edge_set, .{
+                        try appendEdge(allocator, edges, edge_set, .{
                             .child_file = fc.file,
                             .child_class = cls.name,
                             .parent_file = cand_file,
@@ -146,8 +159,6 @@ pub const InheritGraphBuilder = struct {
                 }
             }
         }
-
-        return try edges.toOwnedSlice(allocator);
     }
 
     fn appendEdge(

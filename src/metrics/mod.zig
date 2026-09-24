@@ -14,6 +14,18 @@ pub const HealthReport = root_causes.HealthReport;
 pub const RootCauseRaw = root_causes.RootCauseRaw;
 pub const RootCauseScores = root_causes.RootCauseScores;
 
+const FunctionCounts = struct {
+    total: u32,
+    dead: u32,
+    duplicates: u32,
+    redundancy: f64,
+};
+
+const GraphMetrics = struct {
+    cycle_count: u32,
+    max_depth: u32,
+};
+
 /// Compute health report from a snapshot.
 ///
 /// This is the master function that orchestrates all 5 root cause metrics
@@ -54,20 +66,79 @@ pub fn computeHealth(
         file_paths.items,
     );
 
-    // 2. Cycle detection (acyclicity)
-    // Build node-indexed edges for cycle detection and depth. Acyclicity uses
-    // the union of imports, calls, and inheritance; depth remains import-only.
+    const graph_metrics = try computeGraphMetrics(
+        allocator,
+        file_paths.items,
+        import_edges,
+        call_edges,
+        inherit_edges,
+    );
+
+    const gini = try computeEquality(allocator, file_funcs, file_lines.items);
+    const function_counts = try computeFunctionCounts(allocator, file_funcs, call_edges);
+
+    // Aggregate root causes
+    const raw = RootCauseRaw{
+        .modularity_q = q,
+        .cycle_count = graph_metrics.cycle_count,
+        .max_depth = graph_metrics.max_depth,
+        .complexity_gini = gini,
+        .redundancy_ratio = function_counts.redundancy,
+    };
+
+    const scores, const quality_signal = root_causes.computeRootCauseScores(raw);
+    const bottleneck = root_causes.findBottleneck(scores);
+
+    return .{
+        .quality_signal = quality_signal,
+        .quality_signal_int = @intFromFloat(quality_signal * 10000.0),
+        .root_cause_raw = raw,
+        .root_cause_scores = scores,
+        .file_count = std.math.cast(u32, file_paths.items.len) orelse return error.IntegerOverflow,
+        .line_count = std.math.cast(u32, total_lines) orelse return error.IntegerOverflow,
+        .edge_count = std.math.cast(u32, import_edges.len + call_edges.len + inherit_edges.len) orelse return error.IntegerOverflow,
+        .bottleneck = bottleneck,
+        .total_functions = function_counts.total,
+        .dead_functions = function_counts.dead,
+        .duplicate_functions = function_counts.duplicates,
+    };
+}
+
+fn computeGraphMetrics(
+    allocator: Allocator,
+    file_paths: []const []const u8,
+    import_edges: []const core.types.ImportEdge,
+    call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
+) !GraphMetrics {
     var node_index = std.StringHashMap(usize).init(allocator);
     defer node_index.deinit();
-    for (file_paths.items, 0..) |path, i| {
+    for (file_paths, 0..) |path, index| {
         if (node_index.contains(path)) return error.DuplicateNode;
-        _ = try node_index.put(path, i);
+        _ = try node_index.put(path, index);
     }
-
     var cycle_edges = std.ArrayList(core.types.GraphEdge).empty;
     defer cycle_edges.deinit(allocator);
     var depth_edges = std.ArrayList(core.types.GraphEdge).empty;
     defer depth_edges.deinit(allocator);
+    try appendGraphEdges(allocator, &node_index, import_edges, call_edges, inherit_edges, &cycle_edges, &depth_edges);
+    const cycle_count = try acyclicity.detectCycles(allocator, file_paths, cycle_edges.items);
+    var entry_points = std.ArrayList(usize).empty;
+    defer entry_points.deinit(allocator);
+    try selectEntryPoints(allocator, file_paths, import_edges, &node_index, &entry_points);
+    const max_depth = try depth.computeMaxDepth(allocator, file_paths.len, entry_points.items, depth_edges.items);
+    return .{ .cycle_count = cycle_count, .max_depth = max_depth };
+}
+
+fn appendGraphEdges(
+    allocator: Allocator,
+    node_index: *const std.StringHashMap(usize),
+    import_edges: []const core.types.ImportEdge,
+    call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
+    cycle_edges: *std.ArrayList(core.types.GraphEdge),
+    depth_edges: *std.ArrayList(core.types.GraphEdge),
+) !void {
     for (import_edges) |edge| {
         const from_id = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
         const to_id = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
@@ -84,55 +155,37 @@ pub fn computeHealth(
         const to_id = node_index.get(edge.parent_file) orelse return error.InvalidGraphEdge;
         try cycle_edges.append(allocator, .{ .from = from_id, .to = to_id });
     }
+}
 
-    const cycle_count = try acyclicity.detectCycles(
-        allocator,
-        file_paths.items,
-        cycle_edges.items,
-    );
-
-    // 3. Depth from entry points
-    // Prefer conventional entry files (main.*, index.*, build.zig, ...);
-    // fall back to files with no incoming import edges.
-    var entry_points = std.ArrayList(usize).empty;
-    defer entry_points.deinit(allocator);
-    {
-        // Pass 1: conventional entry-point paths
-        for (file_paths.items, 0..) |path, i| {
-            if (core.path_utils.isEntryPointPath(path)) {
-                try entry_points.append(allocator, i);
-            }
+fn selectEntryPoints(
+    allocator: Allocator,
+    file_paths: []const []const u8,
+    import_edges: []const core.types.ImportEdge,
+    node_index: *const std.StringHashMap(usize),
+    entries: *std.ArrayList(usize),
+) !void {
+    for (file_paths, 0..) |path, index| {
+        if (core.path_utils.isEntryPointPath(path)) try entries.append(allocator, index);
+    }
+    if (entries.items.len == 0 and import_edges.len > 0) {
+        const incoming = try allocator.alloc(bool, file_paths.len);
+        defer allocator.free(incoming);
+        @memset(incoming, false);
+        for (import_edges) |edge| {
+            if (node_index.get(edge.to_file)) |to_id| incoming[to_id] = true;
         }
-
-        // Pass 2 (fallback): no incoming edges
-        if (entry_points.items.len == 0 and import_edges.len > 0) {
-            const incoming = try allocator.alloc(bool, file_paths.items.len);
-            defer allocator.free(incoming);
-            @memset(incoming, false);
-            for (import_edges) |edge| {
-                if (node_index.get(edge.to_file)) |to_id| {
-                    incoming[to_id] = true;
-                }
-            }
-            for (incoming, 0..) |has_incoming, i| {
-                if (!has_incoming) try entry_points.append(allocator, i);
-            }
-        }
-
-        // Pass 3 (last resort): first file
-        if (entry_points.items.len == 0 and file_paths.items.len > 0) {
-            try entry_points.append(allocator, 0);
+        for (incoming, 0..) |has_incoming, index| {
+            if (!has_incoming) try entries.append(allocator, index);
         }
     }
+    if (entries.items.len == 0 and file_paths.len != 0) try entries.append(allocator, 0);
+}
 
-    const max_depth = try depth.computeMaxDepth(
-        allocator,
-        file_paths.items.len,
-        entry_points.items,
-        depth_edges.items,
-    );
-
-    // 4. Complexity Gini (equality)
+fn computeEquality(
+    allocator: Allocator,
+    file_funcs: []const dead_code.FileFuncs,
+    file_lines: []const u32,
+) !f64 {
     var complexity_values = std.ArrayList(f64).empty;
     defer complexity_values.deinit(allocator);
     for (file_funcs) |file| {
@@ -142,47 +195,23 @@ pub fn computeHealth(
             }
         }
     }
-    const gini = if (complexity_values.items.len > 0)
-        equality.computeFunctionComplexityGini(complexity_values.items)
-    else
-        equality.computeFileSizeGini(file_lines.items);
+    if (complexity_values.items.len != 0) {
+        return equality.computeFunctionComplexityGini(complexity_values.items);
+    }
+    return equality.computeFileSizeGini(file_lines);
+}
 
-    // 5. Redundancy: dead code + duplicates
-    var total_funcs: u32 = 0;
-    var dead_funcs: u32 = 0;
-    var dup_funcs: u32 = 0;
-    const redundancy_ratio: f64 = blk: {
-        const dc = try dead_code.analyze(allocator, file_funcs, call_edges);
-        total_funcs = dc.total_functions;
-        dead_funcs = dc.dead_functions;
-        dup_funcs = dc.duplicate_functions;
-        break :blk dc.redundancy_ratio;
-    };
-
-    // Aggregate root causes
-    const raw = RootCauseRaw{
-        .modularity_q = q,
-        .cycle_count = cycle_count,
-        .max_depth = max_depth,
-        .complexity_gini = gini,
-        .redundancy_ratio = redundancy_ratio,
-    };
-
-    const scores, const quality_signal = root_causes.computeRootCauseScores(raw);
-    const bottleneck = root_causes.findBottleneck(scores);
-
+fn computeFunctionCounts(
+    allocator: Allocator,
+    file_funcs: []const dead_code.FileFuncs,
+    call_edges: []const core.types.CallEdge,
+) !FunctionCounts {
+    const result = try dead_code.analyze(allocator, file_funcs, call_edges);
     return .{
-        .quality_signal = quality_signal,
-        .quality_signal_int = @intFromFloat(quality_signal * 10000.0),
-        .root_cause_raw = raw,
-        .root_cause_scores = scores,
-        .file_count = std.math.cast(u32, file_paths.items.len) orelse return error.IntegerOverflow,
-        .line_count = std.math.cast(u32, total_lines) orelse return error.IntegerOverflow,
-        .edge_count = std.math.cast(u32, import_edges.len + call_edges.len + inherit_edges.len) orelse return error.IntegerOverflow,
-        .bottleneck = bottleneck,
-        .total_functions = total_funcs,
-        .dead_functions = dead_funcs,
-        .duplicate_functions = dup_funcs,
+        .total = result.total_functions,
+        .dead = result.dead_functions,
+        .duplicates = result.duplicate_functions,
+        .redundancy = result.redundancy_ratio,
     };
 }
 

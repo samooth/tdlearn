@@ -610,6 +610,87 @@ fn checkBoundaryRules(
     }
 }
 
+fn checkConstraintRules(
+    allocator: Allocator,
+    constraints: *const RulesConfig.Constraints,
+    input: *const CheckInput,
+    violations: *std.ArrayList(Violation),
+    checked: *u32,
+) !void {
+    if (constraints.min_quality) |min| {
+        checked.* += 1;
+        if (input.quality_signal < min) try violations.append(allocator, .{
+            .rule = "min_quality",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "quality {d:.3} < required {d:.3}", .{ input.quality_signal, min }),
+        });
+    }
+    if (constraints.min_modularity) |min| {
+        checked.* += 1;
+        if (input.modularity < min) try violations.append(allocator, .{
+            .rule = "min_modularity",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "modularity {d:.3} < required {d:.3}", .{ input.modularity, min }),
+        });
+    }
+    if (constraints.min_acyclicity) |min| {
+        checked.* += 1;
+        if (input.acyclicity < min) try violations.append(allocator, .{
+            .rule = "min_acyclicity",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "acyclicity {d:.3} < required {d:.3} ({d} cycles)", .{ input.acyclicity, min, input.cycle_count }),
+        });
+    }
+    if (constraints.min_depth) |min| {
+        checked.* += 1;
+        if (input.depth < min) try violations.append(allocator, .{
+            .rule = "min_depth",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "depth score {d:.3} < required {d:.3}", .{ input.depth, min }),
+        });
+    }
+    if (constraints.min_equality) |min| {
+        checked.* += 1;
+        if (input.equality < min) try violations.append(allocator, .{
+            .rule = "min_equality",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "equality {d:.3} < required {d:.3}", .{ input.equality, min }),
+        });
+    }
+    if (constraints.min_redundancy) |min| {
+        checked.* += 1;
+        if (input.redundancy < min) try violations.append(allocator, .{
+            .rule = "min_redundancy",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "redundancy {d:.3} < required {d:.3}", .{ input.redundancy, min }),
+        });
+    }
+    if (constraints.max_cycles) |max| {
+        checked.* += 1;
+        if (input.cycle_count > max) try violations.append(allocator, .{
+            .rule = "max_cycles",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "{d} cycles > allowed {d}", .{ input.cycle_count, max }),
+        });
+    }
+    if (constraints.max_file_lines) |max| {
+        checked.* += 1;
+        if (input.max_file_lines > max) try violations.append(allocator, .{
+            .rule = "max_file_lines",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "largest file has {d} lines > allowed {d}", .{ input.max_file_lines, max }),
+        });
+    }
+    if (constraints.max_fn_lines) |max| {
+        checked.* += 1;
+        if (input.max_fn_lines > max) try violations.append(allocator, .{
+            .rule = "max_fn_lines",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "largest function has {d} lines > allowed {d}", .{ input.max_fn_lines, max }),
+        });
+    }
+}
+
 /// Check a scan against rules. Returns violations (empty = pass).
 pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *const CheckInput) !CheckResult {
     var violations = std.ArrayList(Violation).empty;
@@ -626,97 +707,7 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
     const c = &config.constraints;
     var checked: u32 = 0;
 
-    // ── Constraint checks ──
-    if (c.min_quality) |min| {
-        checked += 1;
-        if (input.quality_signal < min) {
-            try violations.append(allocator, .{
-                .rule = "min_quality",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "quality {d:.3} < required {d:.3}", .{ input.quality_signal, min }),
-            });
-        }
-    }
-    if (c.min_modularity) |min| {
-        checked += 1;
-        if (input.modularity < min) {
-            try violations.append(allocator, .{
-                .rule = "min_modularity",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "modularity {d:.3} < required {d:.3}", .{ input.modularity, min }),
-            });
-        }
-    }
-    if (c.min_acyclicity) |min| {
-        checked += 1;
-        if (input.acyclicity < min) {
-            try violations.append(allocator, .{
-                .rule = "min_acyclicity",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "acyclicity {d:.3} < required {d:.3} ({d} cycles)", .{ input.acyclicity, min, input.cycle_count }),
-            });
-        }
-    }
-    if (c.min_depth) |min| {
-        checked += 1;
-        if (input.depth < min) {
-            try violations.append(allocator, .{
-                .rule = "min_depth",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "depth score {d:.3} < required {d:.3}", .{ input.depth, min }),
-            });
-        }
-    }
-    if (c.min_equality) |min| {
-        checked += 1;
-        if (input.equality < min) {
-            try violations.append(allocator, .{
-                .rule = "min_equality",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "equality {d:.3} < required {d:.3}", .{ input.equality, min }),
-            });
-        }
-    }
-    if (c.min_redundancy) |min| {
-        checked += 1;
-        if (input.redundancy < min) {
-            try violations.append(allocator, .{
-                .rule = "min_redundancy",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "redundancy {d:.3} < required {d:.3}", .{ input.redundancy, min }),
-            });
-        }
-    }
-    if (c.max_cycles) |max| {
-        checked += 1;
-        if (input.cycle_count > max) {
-            try violations.append(allocator, .{
-                .rule = "max_cycles",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "{d} cycles > allowed {d}", .{ input.cycle_count, max }),
-            });
-        }
-    }
-    if (c.max_file_lines) |max| {
-        checked += 1;
-        if (input.max_file_lines > max) {
-            try violations.append(allocator, .{
-                .rule = "max_file_lines",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "largest file has {d} lines > allowed {d}", .{ input.max_file_lines, max }),
-            });
-        }
-    }
-    if (c.max_fn_lines) |max| {
-        checked += 1;
-        if (input.max_fn_lines > max) {
-            try violations.append(allocator, .{
-                .rule = "max_fn_lines",
-                .severity = .err,
-                .message = try std.fmt.allocPrint(allocator, "largest function has {d} lines > allowed {d}", .{ input.max_fn_lines, max }),
-            });
-        }
-    }
+    try checkConstraintRules(allocator, c, input, &violations, &checked);
 
     try checkLayerRules(allocator, config.layers, input, &violations, &checked);
     try checkBoundaryRules(allocator, config.boundaries, input, &violations, &checked);

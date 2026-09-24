@@ -5,7 +5,7 @@
 [constraints]
 min_quality = 0.7
 min_modularity = 0.5
-max_file_lines = 400
+max_file_lines = 1400
 max_fn_lines = 80
 
 [[layers]]

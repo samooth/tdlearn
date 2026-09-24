@@ -7,6 +7,121 @@ const core = @import("core");
 /// counted; only SCCs containing at least two nodes are circular dependencies.
 /// Edge endpoints must belong to `nodes`; unknown endpoints return
 /// `error.InvalidGraphEdge`.
+const DfsFrame = struct {
+    node: usize,
+    next_neighbor: usize,
+};
+
+const TarjanSolver = struct {
+    allocator: Allocator,
+    adj: []std.ArrayList(usize),
+    stack: std.ArrayList(usize),
+    on_stack: []bool,
+    index_map: []?u32,
+    lowlink: []u32,
+    dfs_stack: std.ArrayList(DfsFrame),
+    index_counter: u32 = 0,
+    cycle_count: u32 = 0,
+
+    fn init(allocator: Allocator, adj: []std.ArrayList(usize)) !TarjanSolver {
+        var stack = std.ArrayList(usize).empty;
+        errdefer stack.deinit(allocator);
+        var dfs_stack = std.ArrayList(DfsFrame).empty;
+        errdefer dfs_stack.deinit(allocator);
+        const on_stack = try allocator.alloc(bool, adj.len);
+        errdefer allocator.free(on_stack);
+        @memset(on_stack, false);
+        const index_map = try allocator.alloc(?u32, adj.len);
+        errdefer allocator.free(index_map);
+        @memset(index_map, null);
+        const lowlink = try allocator.alloc(u32, adj.len);
+        errdefer allocator.free(lowlink);
+        @memset(lowlink, 0);
+        return .{
+            .allocator = allocator,
+            .adj = adj,
+            .stack = stack,
+            .on_stack = on_stack,
+            .index_map = index_map,
+            .lowlink = lowlink,
+            .dfs_stack = dfs_stack,
+        };
+    }
+
+    fn deinit(self: *TarjanSolver) void {
+        self.stack.deinit(self.allocator);
+        self.dfs_stack.deinit(self.allocator);
+        self.allocator.free(self.on_stack);
+        self.allocator.free(self.index_map);
+        self.allocator.free(self.lowlink);
+    }
+
+    fn run(self: *TarjanSolver) !u32 {
+        for (0..self.adj.len) |start| {
+            if (self.index_map[start] != null) continue;
+            try self.dfs_stack.append(self.allocator, .{ .node = start, .next_neighbor = 0 });
+            while (self.dfs_stack.items.len != 0) {
+                const frame = &self.dfs_stack.items[self.dfs_stack.items.len - 1];
+                const node = frame.node;
+                if (self.index_map[node] == null) try self.enterNode(node);
+                if (try self.processNeighbors(frame)) {
+                    try self.finishNode(node);
+                    _ = self.dfs_stack.pop();
+                }
+            }
+        }
+        return self.cycle_count;
+    }
+
+    fn enterNode(self: *TarjanSolver, node: usize) !void {
+        if (self.index_counter == std.math.maxInt(u32)) return error.IntegerOverflow;
+        self.index_map[node] = self.index_counter;
+        self.lowlink[node] = self.index_counter;
+        self.index_counter += 1;
+        try self.stack.append(self.allocator, node);
+        self.on_stack[node] = true;
+    }
+
+    fn processNeighbors(self: *TarjanSolver, frame: *DfsFrame) !bool {
+        const node = frame.node;
+        while (frame.next_neighbor < self.adj[node].items.len) {
+            const neighbor = self.adj[node].items[frame.next_neighbor];
+            frame.next_neighbor += 1;
+            if (self.index_map[neighbor] == null) {
+                try self.dfs_stack.append(self.allocator, .{ .node = neighbor, .next_neighbor = 0 });
+                return false;
+            }
+            if (self.on_stack[neighbor]) {
+                const neighbor_index = self.index_map[neighbor].?;
+                if (self.lowlink[node] > neighbor_index) self.lowlink[node] = neighbor_index;
+            }
+        }
+        return true;
+    }
+
+    fn finishNode(self: *TarjanSolver, node: usize) !void {
+        if (self.lowlink[node] == self.index_map[node].?) {
+            var scc_size: u32 = 0;
+            while (self.stack.items.len != 0) {
+                const member = self.stack.items[self.stack.items.len - 1];
+                if (self.index_map[member].? < self.index_map[node].?) break;
+                _ = self.stack.pop();
+                self.on_stack[member] = false;
+                if (scc_size == std.math.maxInt(u32)) return error.IntegerOverflow;
+                scc_size += 1;
+            }
+            if (scc_size > 1) {
+                if (self.cycle_count == std.math.maxInt(u32)) return error.IntegerOverflow;
+                self.cycle_count += 1;
+            }
+        }
+        if (self.dfs_stack.items.len > 1) {
+            const parent = self.dfs_stack.items[self.dfs_stack.items.len - 2].node;
+            if (self.lowlink[parent] > self.lowlink[node]) self.lowlink[parent] = self.lowlink[node];
+        }
+    }
+};
+
 pub fn detectCycles(
     allocator: Allocator,
     nodes: []const []const u8,
@@ -18,115 +133,17 @@ pub fn detectCycles(
     }
     if (n == 0) return 0;
 
-    // Build adjacency list
-    var adj = try std.ArrayList(std.ArrayList(usize)).initCapacity(allocator, n);
+    var adjacency = try std.ArrayList(std.ArrayList(usize)).initCapacity(allocator, n);
     defer {
-        for (adj.items) |*list| list.deinit(allocator);
-        adj.deinit(allocator);
+        for (adjacency.items) |*list| list.deinit(allocator);
+        adjacency.deinit(allocator);
     }
-    for (0..n) |_| {
-        try adj.append(allocator, std.ArrayList(usize).empty);
-    }
+    for (0..n) |_| try adjacency.append(allocator, std.ArrayList(usize).empty);
+    for (edges) |edge| try adjacency.items[edge.from].append(allocator, edge.to);
 
-    for (edges) |edge| {
-        try adj.items[edge.from].append(allocator, edge.to);
-    }
-
-    // Tarjan's algorithm (iterative)
-    var index_counter: u32 = 0;
-    var stack = std.ArrayList(usize).empty;
-    defer stack.deinit(allocator);
-    var on_stack = try std.ArrayList(bool).initCapacity(allocator, n);
-    defer on_stack.deinit(allocator);
-    for (0..n) |_| {
-        try on_stack.append(allocator, false);
-    }
-    var index_map = try std.ArrayList(?u32).initCapacity(allocator, n);
-    defer index_map.deinit(allocator);
-    for (0..n) |_| {
-        try index_map.append(allocator, null);
-    }
-    var lowlink = try std.ArrayList(u32).initCapacity(allocator, n);
-    defer lowlink.deinit(allocator);
-    for (0..n) |_| {
-        try lowlink.append(allocator, 0);
-    }
-
-    var cycle_count: u32 = 0;
-
-    // DFS stack: (node, neighbor_index)
-    var dfs_stack = std.ArrayList(struct { node: usize, next_neighbor: usize }).empty;
-    defer dfs_stack.deinit(allocator);
-
-    for (0..n) |start| {
-        if (index_map.items[start] != null) continue;
-
-        try dfs_stack.append(allocator, .{ .node = start, .next_neighbor = 0 });
-
-        while (dfs_stack.items.len > 0) {
-            const frame = &dfs_stack.items[dfs_stack.items.len - 1];
-            const v = frame.node;
-
-            if (index_map.items[v] == null) {
-                // First time visiting this node
-                index_map.items[v] = index_counter;
-                lowlink.items[v] = index_counter;
-                index_counter += 1;
-                try stack.append(allocator, v);
-                on_stack.items[v] = true;
-            }
-
-            // Process neighbors
-            var processed = true;
-            while (frame.next_neighbor < adj.items[v].items.len) {
-                const w = adj.items[v].items[frame.next_neighbor];
-                frame.next_neighbor += 1;
-
-                if (index_map.items[w] == null) {
-                    // Unvisited neighbor — push it
-                    try dfs_stack.append(allocator, .{ .node = w, .next_neighbor = 0 });
-                    processed = false;
-                    break;
-                } else if (on_stack.items[w]) {
-                    // Neighbor on stack — update lowlink
-                    const w_idx = index_map.items[w].?;
-                    if (lowlink.items[v] > w_idx) {
-                        lowlink.items[v] = w_idx;
-                    }
-                }
-            }
-
-            if (processed) {
-                // All neighbors processed — backtrack
-                if (lowlink.items[v] == index_map.items[v].?) {
-                    // v is root of an SCC
-                    var scc_size: u32 = 0;
-                    while (stack.items.len > 0) {
-                        const w = stack.items[stack.items.len - 1];
-                        if (index_map.items[w].? < index_map.items[v].?) break;
-                        _ = stack.pop();
-                        on_stack.items[w] = false;
-                        scc_size += 1;
-                    }
-                    if (scc_size > 1) {
-                        cycle_count += 1;
-                    }
-                }
-
-                // Update parent's lowlink
-                if (dfs_stack.items.len > 1) {
-                    const parent = &dfs_stack.items[dfs_stack.items.len - 2];
-                    if (lowlink.items[parent.node] > lowlink.items[v]) {
-                        lowlink.items[parent.node] = lowlink.items[v];
-                    }
-                }
-
-                _ = dfs_stack.pop();
-            }
-        }
-    }
-
-    return cycle_count;
+    var solver = try TarjanSolver.init(allocator, adjacency.items);
+    defer solver.deinit();
+    return solver.run();
 }
 
 /// Compute acyclicity score: 1 / (1 + cycle_count).

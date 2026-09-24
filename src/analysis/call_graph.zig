@@ -87,81 +87,15 @@ pub const CallGraphBuilder = struct {
             try gop.value_ptr.*.append(allocator, edge.to_file);
         }
 
-        // Extract call sites per function and resolve
-        for (file_funcs) |ff| {
-            const sites = try extractCallSites(allocator, ff);
-            defer allocator.free(sites);
-
-            const imported = imports_by_file.get(ff.file);
-
-            var target_counts = std.StringHashMap(u32).init(allocator);
-            defer target_counts.deinit();
-            for (sites) |site| {
-                // Find the enclosing function for the caller name
-                const caller = enclosingFunc(ff.funcs, site.line) orelse continue;
-                if (max_call_targets > 0) {
-                    const count = target_counts.get(caller.name) orelse 0;
-                    if (count >= max_call_targets) continue;
-                    try target_counts.put(caller.name, count + 1);
-                }
-
-                // 1. Same-file call — no cross-file edge
-                if (hasLocalFunc(ff.funcs, site.callee)) continue;
-
-                const candidates = fn_index.get(site.callee) orelse continue;
-
-                // 2. Prefer a definition in a file that this file imports
-                if (imported) |imp| {
-                    var matched: ?FnEntry = null;
-                    var public_matched: ?FnEntry = null;
-                    for (candidates.items) |cand| {
-                        var is_imported = false;
-                        for (imp.items) |imp_file| {
-                            if (std.mem.eql(u8, imp_file, cand.file)) {
-                                is_imported = true;
-                                break;
-                            }
-                        }
-                        if (!is_imported) continue;
-                        matched = cand;
-                        if (cand.func.is_public and public_matched == null) {
-                            public_matched = cand;
-                        }
-                    }
-                    if (public_matched orelse matched) |target| {
-                        try appendEdge(allocator, &edges, &edge_set, .{
-                            .from_file = ff.file,
-                            .from_func = caller.name,
-                            .to_file = target.file,
-                            .to_func = site.callee,
-                        });
-                        continue;
-                    }
-                }
-
-                // 3. Unique public definition project-wide — plain calls only.
-                // Qualified calls (`x.name(`) may be object dispatch, which
-                // can't be distinguished from module access at line level.
-                if (site.qualified) continue;
-                var public_count: usize = 0;
-                var public_target: ?FnEntry = null;
-                for (candidates.items) |cand| {
-                    if (cand.func.is_public) {
-                        public_count += 1;
-                        if (public_target == null) public_target = cand;
-                    }
-                }
-                if (public_count == 1) {
-                    const target = public_target.?;
-                    try appendEdge(allocator, &edges, &edge_set, .{
-                        .from_file = ff.file,
-                        .from_func = caller.name,
-                        .to_file = target.file,
-                        .to_func = site.callee,
-                    });
-                }
-            }
-        }
+        try appendResolvedEdges(
+            allocator,
+            file_funcs,
+            &fn_index,
+            &imports_by_file,
+            max_call_targets,
+            &edges,
+            &edge_set,
+        );
 
         return try edges.toOwnedSlice(allocator);
     }
@@ -186,6 +120,77 @@ pub const CallGraphBuilder = struct {
         file: []const u8,
         func: core.types.FuncInfo,
     };
+
+    fn appendResolvedEdges(
+        allocator: Allocator,
+        file_funcs: []const core.types.FileFuncs,
+        fn_index: *const std.StringHashMap(*FnEntryList),
+        imports_by_file: *const std.StringHashMap(*std.ArrayList([]const u8)),
+        max_call_targets: u32,
+        edges: *std.ArrayList(core.types.CallEdge),
+        edge_set: *EdgeSet,
+    ) !void {
+        for (file_funcs) |ff| {
+            const sites = try extractCallSites(allocator, ff);
+            defer allocator.free(sites);
+            const imported = imports_by_file.get(ff.file);
+            var target_counts = std.StringHashMap(u32).init(allocator);
+            defer target_counts.deinit();
+            for (sites) |site| {
+                const caller = enclosingFunc(ff.funcs, site.line) orelse continue;
+                if (max_call_targets > 0) {
+                    const count = target_counts.get(caller.name) orelse 0;
+                    if (count >= max_call_targets) continue;
+                    try target_counts.put(caller.name, count + 1);
+                }
+                if (hasLocalFunc(ff.funcs, site.callee)) continue;
+                const candidates = fn_index.get(site.callee) orelse continue;
+                if (imported) |imp| {
+                    var matched: ?FnEntry = null;
+                    var public_matched: ?FnEntry = null;
+                    for (candidates.items) |cand| {
+                        var is_imported = false;
+                        for (imp.items) |imp_file| {
+                            if (std.mem.eql(u8, imp_file, cand.file)) {
+                                is_imported = true;
+                                break;
+                            }
+                        }
+                        if (!is_imported) continue;
+                        matched = cand;
+                        if (cand.func.is_public and public_matched == null) public_matched = cand;
+                    }
+                    if (public_matched orelse matched) |target| {
+                        try appendEdge(allocator, edges, edge_set, .{
+                            .from_file = ff.file,
+                            .from_func = caller.name,
+                            .to_file = target.file,
+                            .to_func = site.callee,
+                        });
+                        continue;
+                    }
+                }
+                if (site.qualified) continue;
+                var public_count: usize = 0;
+                var public_target: ?FnEntry = null;
+                for (candidates.items) |cand| {
+                    if (cand.func.is_public) {
+                        public_count += 1;
+                        if (public_target == null) public_target = cand;
+                    }
+                }
+                if (public_count == 1) {
+                    const target = public_target.?;
+                    try appendEdge(allocator, edges, edge_set, .{
+                        .from_file = ff.file,
+                        .from_func = caller.name,
+                        .to_file = target.file,
+                        .to_func = site.callee,
+                    });
+                }
+            }
+        }
+    }
 
     fn appendEdge(
         allocator: Allocator,

@@ -34,38 +34,7 @@ pub fn sanitizeLine(
 ) !void {
     var index: usize = 0;
     while (index < raw.len) {
-        if (state.block_comment) {
-            if (std.mem.startsWith(u8, raw[index..], "*/")) {
-                try appendCommentMarker(allocator, output, mode, 2);
-                state.block_comment = false;
-                index += 2;
-            } else {
-                try appendCommentMarker(allocator, output, mode, 1);
-                index += 1;
-            }
-            continue;
-        }
-        if (state.triple_quote != 0) {
-            if (hasTripleQuote(raw, index, state.triple_quote)) {
-                try appendLiteral(allocator, output, raw[index .. index + 3], mode);
-                state.triple_quote = 0;
-                index += 3;
-            } else {
-                try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-                index += 1;
-            }
-            continue;
-        }
-        if (state.template) {
-            if (raw[index] == '`') {
-                try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-                state.template = false;
-            } else {
-                try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-            }
-            index += 1;
-            continue;
-        }
+        if (try consumeLiteralState(allocator, output, raw, &index, mode, state)) continue;
 
         if (language == .python and raw[index] == '#') {
             try appendComment(allocator, output, raw.len - index, mode);
@@ -117,6 +86,45 @@ pub fn sanitizeLine(
         try appendCode(allocator, output, raw[index], mode);
         index += 1;
     }
+}
+
+fn consumeLiteralState(
+    allocator: Allocator,
+    output: *ArrayList,
+    raw: []const u8,
+    index: *usize,
+    mode: Mode,
+    state: *State,
+) !bool {
+    if (state.block_comment) {
+        if (std.mem.startsWith(u8, raw[index.*..], "*/")) {
+            try appendCommentMarker(allocator, output, mode, 2);
+            state.block_comment = false;
+            index.* += 2;
+        } else {
+            try appendCommentMarker(allocator, output, mode, 1);
+            index.* += 1;
+        }
+        return true;
+    }
+    if (state.triple_quote != 0) {
+        if (hasTripleQuote(raw, index.*, state.triple_quote)) {
+            try appendLiteral(allocator, output, raw[index.* .. index.* + 3], mode);
+            state.triple_quote = 0;
+            index.* += 3;
+        } else {
+            try appendLiteral(allocator, output, raw[index.* .. index.* + 1], mode);
+            index.* += 1;
+        }
+        return true;
+    }
+    if (state.template) {
+        try appendLiteral(allocator, output, raw[index.* .. index.* + 1], mode);
+        if (raw[index.*] == '`') state.template = false;
+        index.* += 1;
+        return true;
+    }
+    return false;
 }
 
 fn hasTripleQuote(raw: []const u8, index: usize, quote: u8) bool {

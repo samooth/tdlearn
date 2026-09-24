@@ -49,39 +49,26 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // ── Run command ───────────────────────────────────────────────
+    addRunCommand(b, exe);
+    addTestStep(b, core_mod, metrics_mod, analysis_mod, exe_mod);
+}
+
+fn addRunCommand(b: *std.Build, exe: anytype) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run tdlearn");
     run_step.dependOn(&run_cmd.step);
+}
 
-    // ── Unit tests ────────────────────────────────────────────────
-    const core_tests = b.addTest(.{
-        .root_module = core_mod,
-    });
-    const run_core_tests = b.addRunArtifact(core_tests);
-
-    const metrics_tests = b.addTest(.{
-        .root_module = metrics_mod,
-    });
-    const run_metrics_tests = b.addRunArtifact(metrics_tests);
-
-    const analysis_tests = b.addTest(.{
-        .root_module = analysis_mod,
-    });
-    const run_analysis_tests = b.addRunArtifact(analysis_tests);
-
-    const main_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-    const run_main_tests = b.addRunArtifact(main_tests);
-
+fn addTestStep(b: *std.Build, core_mod: anytype, metrics_mod: anytype, analysis_mod: anytype, exe_mod: anytype) void {
+    const core_tests = b.addTest(.{ .root_module = core_mod });
+    const metrics_tests = b.addTest(.{ .root_module = metrics_mod });
+    const analysis_tests = b.addTest(.{ .root_module = analysis_mod });
+    const main_tests = b.addTest(.{ .root_module = exe_mod });
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_core_tests.step);
-    test_step.dependOn(&run_metrics_tests.step);
-    test_step.dependOn(&run_analysis_tests.step);
-    test_step.dependOn(&run_main_tests.step);
+    test_step.dependOn(&b.addRunArtifact(core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(metrics_tests).step);
+    test_step.dependOn(&b.addRunArtifact(analysis_tests).step);
+    test_step.dependOn(&b.addRunArtifact(main_tests).step);
 }

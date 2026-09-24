@@ -49,6 +49,12 @@ const DuplicateResult = struct {
     count: u32,
 };
 
+const DeadSummary = struct {
+    flags: []bool,
+    files: []const []const u8,
+    count: u32,
+};
+
 fn deinitOwnedKeys(allocator: Allocator, map: *std.StringHashMap(void)) void {
     var iterator = map.iterator();
     while (iterator.next()) |entry| allocator.free(entry.key_ptr.*);
@@ -89,65 +95,31 @@ pub fn analyze(
     var test_names = std.StringHashMap(void).init(allocator);
     defer deinitOwnedKeys(allocator, &test_names);
 
-    for (file_funcs) |ff| {
-        const record_start = records.items.len;
-        for (ff.funcs) |func| {
-            try records.append(allocator, .{
-                .file = ff.file,
-                .func = func,
-            });
-        }
-        if (!isTestPath(ff.file)) {
-            try collectLocalCalls(allocator, ff, record_start, &local_calls);
-            try collectSymbolReferences(allocator, ff, &production_names, &production_calls, &test_names);
-        }
-    }
+    try collectRecordsAndReferences(
+        allocator,
+        file_funcs,
+        &records,
+        &local_calls,
+        &production_names,
+        &production_calls,
+        &test_names,
+    );
 
-    var reachable = try allocator.alloc(bool, records.items.len);
+    const reachable = try allocator.alloc(bool, records.items.len);
     defer allocator.free(reachable);
     @memset(reachable, false);
+    propagateReachability(
+        records.items,
+        reachable,
+        call_edges,
+        local_calls.items,
+        &production_names,
+        &test_names,
+    );
 
-    for (records.items, 0..) |record, id| {
-        if (isTestPath(record.file)) continue;
-        if (record.func.is_public or isRootFunction(record) or
-            production_names.contains(record.func.name) or test_names.contains(record.func.name)) reachable[id] = true;
-    }
-
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (call_edges) |edge| {
-            if (isTestPath(edge.from_file) or isTestPath(edge.to_file)) continue;
-            if (markCallTargets(records.items, reachable, edge.from_file, edge.from_func, edge.to_file, edge.to_func)) {
-                changed = true;
-            }
-        }
-        for (local_calls.items) |call| {
-            if (markLocalTargets(records.items, reachable, call, call_edges)) changed = true;
-        }
-    }
-
-    var dead_flags = try allocator.alloc(bool, records.items.len);
-    defer allocator.free(dead_flags);
-    @memset(dead_flags, false);
-
-    var dead_files = std.ArrayList([]const u8).empty;
-    errdefer dead_files.deinit(allocator);
-    var dead_file_set = std.StringHashMap(void).init(allocator);
-    defer dead_file_set.deinit();
-
-    var dead: u32 = 0;
-    for (records.items, 0..) |record, id| {
-        if (isTestPath(record.file)) continue;
-        if (record.func.is_public or record.func.is_method or isRootFunction(record)) continue;
-        if (reachable[id]) continue;
-        dead_flags[id] = true;
-        dead += 1;
-        if (!dead_file_set.contains(record.file)) {
-            try dead_file_set.put(record.file, {});
-            try dead_files.append(allocator, record.file);
-        }
-    }
+    const dead_summary = try collectDeadSummary(allocator, records.items, reachable);
+    defer allocator.free(dead_summary.flags);
+    errdefer allocator.free(dead_summary.files);
 
     const duplicates = try collectDuplicateFlags(
         allocator,
@@ -158,31 +130,105 @@ pub fn analyze(
         &test_names,
     );
     defer allocator.free(duplicates.flags);
-    const duplicate_count = duplicates.count;
-    const duplicate_flags = duplicates.flags;
 
-    const total = std.math.cast(u32, records.items.len) orelse return error.IntegerOverflow;
+    return buildResult(records.items.len, dead_summary, duplicates);
+}
+
+fn buildResult(total_records: usize, dead_summary: DeadSummary, duplicates: DuplicateResult) !DeadCodeResult {
+    const total = std.math.cast(u32, total_records) orelse return error.IntegerOverflow;
     var redundant: u32 = 0;
-    for (dead_flags, duplicate_flags) |is_dead, is_duplicate| {
+    for (dead_summary.flags, duplicates.flags) |is_dead, is_duplicate| {
         if (is_dead or is_duplicate) redundant += 1;
     }
-
     var result = DeadCodeResult{
         .total_functions = total,
-        .dead_functions = dead,
-        .duplicate_functions = duplicate_count,
-        .dead_files = try dead_files.toOwnedSlice(allocator),
+        .dead_functions = dead_summary.count,
+        .duplicate_functions = duplicates.count,
+        .dead_files = dead_summary.files,
     };
     if (total == 0) {
         result.redundancy_ratio = 1.0;
         return result;
     }
-
     const total_f = @as(f64, @floatFromInt(total));
-    result.dead_code_ratio = @as(f64, @floatFromInt(dead)) / total_f;
-    result.duplication_ratio = @as(f64, @floatFromInt(duplicate_count)) / total_f;
+    result.dead_code_ratio = @as(f64, @floatFromInt(dead_summary.count)) / total_f;
+    result.duplication_ratio = @as(f64, @floatFromInt(duplicates.count)) / total_f;
     result.redundancy_ratio = @as(f64, @floatFromInt(redundant)) / total_f;
     return result;
+}
+
+fn collectRecordsAndReferences(
+    allocator: Allocator,
+    file_funcs: []const FileFuncs,
+    records: *std.ArrayList(FunctionRecord),
+    local_calls: *std.ArrayList(LocalCall),
+    production_names: *std.StringHashMap(void),
+    production_calls: *std.StringHashMap(void),
+    test_names: *std.StringHashMap(void),
+) !void {
+    for (file_funcs) |ff| {
+        const record_start = records.items.len;
+        for (ff.funcs) |func| {
+            try records.append(allocator, .{ .file = ff.file, .func = func });
+        }
+        if (!isTestPath(ff.file)) {
+            try collectLocalCalls(allocator, ff, record_start, local_calls);
+            try collectSymbolReferences(allocator, ff, production_names, production_calls, test_names);
+        }
+    }
+}
+
+fn propagateReachability(
+    records: []const FunctionRecord,
+    reachable: []bool,
+    call_edges: []const core.types.CallEdge,
+    local_calls: []const LocalCall,
+    production_names: *const std.StringHashMap(void),
+    test_names: *const std.StringHashMap(void),
+) void {
+    for (records, 0..) |record, id| {
+        if (isTestPath(record.file)) continue;
+        if (record.func.is_public or isRootFunction(record) or
+            production_names.contains(record.func.name) or test_names.contains(record.func.name)) reachable[id] = true;
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (call_edges) |edge| {
+            if (isTestPath(edge.from_file) or isTestPath(edge.to_file)) continue;
+            if (markCallTargets(records, reachable, edge.from_file, edge.from_func, edge.to_file, edge.to_func)) changed = true;
+        }
+        for (local_calls) |call| {
+            if (markLocalTargets(records, reachable, call, call_edges)) changed = true;
+        }
+    }
+}
+
+fn collectDeadSummary(
+    allocator: Allocator,
+    records: []const FunctionRecord,
+    reachable: []const bool,
+) !DeadSummary {
+    const flags = try allocator.alloc(bool, records.len);
+    errdefer allocator.free(flags);
+    @memset(flags, false);
+    var files = std.ArrayList([]const u8).empty;
+    errdefer files.deinit(allocator);
+    var file_set = std.StringHashMap(void).init(allocator);
+    defer file_set.deinit();
+    var count: u32 = 0;
+    for (records, 0..) |record, id| {
+        if (isTestPath(record.file)) continue;
+        if (record.func.is_public or record.func.is_method or isRootFunction(record)) continue;
+        if (reachable[id]) continue;
+        flags[id] = true;
+        count += 1;
+        if (!file_set.contains(record.file)) {
+            try file_set.put(record.file, {});
+            try files.append(allocator, record.file);
+        }
+    }
+    return .{ .flags = flags, .files = try files.toOwnedSlice(allocator), .count = count };
 }
 
 fn collectLocalCalls(

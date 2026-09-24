@@ -208,7 +208,7 @@ Prioridades:
 - [x] Validar contadores y tolerancias; definir la semántica de `total_functions`.
 - [x] Escribir mediante archivo temporal y renombrado atómico, sin truncar un baseline válido.
 - [x] Manejar baseline ausente, truncado, corrupto, de versión futura y escritura fallida.
-- [ ] Actualizar `.tdlearn/baseline.json` solo después de estabilizar el análisis y sus tests.
+- [x] Actualizar `.tdlearn/baseline.json` solo después de estabilizar el análisis y sus tests.
 
 ### [ ] CORE-002 — Integrar configuración, ownership y errores tipados
 
@@ -256,7 +256,7 @@ Prioridades:
 ### [ ] CI-001 — Automatizar verificación y releases
 
 - [x] Añadir workflow para `zig fmt --check`, `zig build`, `zig build test` y ReleaseSafe.
-- [ ] Ejecutar `tdlearn check .` y `tdlearn gate .` sobre un baseline estable.
+- [x] Ejecutar `tdlearn check .` y `tdlearn gate .` sobre un baseline estable.
 - [ ] Validar contra una versión estable soportada de Zig y la matriz de sistemas objetivo.
 - [ ] Publicar artefactos, checksums y tags de release de forma reproducible.
 
@@ -273,7 +273,7 @@ Prioridades:
 ### [ ] QA-001 — Cerrar los controles del propio proyecto
 
 - Referencias: `.tdlearn/rules.toml:5-34`, `.tdlearn/baseline.json`.
-- [ ] Hacer que `tdlearn check .` pase sin desactivar límites relevantes.
-- [ ] Resolver o justificar las violaciones actuales de tamaño de archivo/función.
-- [ ] Recalcular el baseline solo después de corregir el análisis y ejecutar la suite completa.
-- [ ] Verificar que `tdlearn gate .` falla solo por regresiones reales.
+- [x] Hacer que `tdlearn check .` pase sin desactivar límites relevantes.
+- [x] Resolver o justificar las violaciones actuales de tamaño de archivo/función.
+- [x] Recalcular el baseline solo después de corregir el análisis y ejecutar la suite completa.
+- [x] Verificar que `tdlearn gate .` falla solo por regresiones reales.

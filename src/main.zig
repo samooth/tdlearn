@@ -396,6 +396,61 @@ fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8
     return try source_paths.toOwnedSlice(allocator);
 }
 
+fn loadSourceContents(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    max_parse_size_kb: u32,
+    file_paths: []const []const u8,
+    source_contents: *std.ArrayList([]const u8),
+    contents_by_path: *std.StringHashMap([]const u8),
+) !void {
+    for (file_paths) |fpath| {
+        const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
+        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
+        if (@as(u64, max_parse_size_kb) * 1024 < contents.len) return error.FileTooLarge;
+        try source_contents.append(arena, contents);
+        try contents_by_path.put(fpath, contents);
+    }
+}
+
+fn collectSourceNodes(
+    arena: std.mem.Allocator,
+    files: []const core.types.FileNode,
+    file_paths: []const []const u8,
+    source_files: *std.ArrayList(core.types.FileNode),
+) !void {
+    for (file_paths) |fpath| {
+        const node = findFileNode(files, fpath) orelse return error.FileNotFound;
+        try source_files.append(arena, node.*);
+    }
+}
+
+fn extractFunctionData(
+    arena: std.mem.Allocator,
+    files: []const core.types.FileNode,
+    file_paths: []const []const u8,
+    source_contents: []const []const u8,
+    file_funcs: *std.ArrayList(metrics.dead_code.FileFuncs),
+    file_classes: *std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses),
+    max_file_lines: *u32,
+    max_fn_lines: *u32,
+) !void {
+    for (file_paths, source_contents) |fpath, contents| {
+        const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
+        const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
+        try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
+        const classes = try analysis.classes.ClassExtractor.extract(arena, contents, lang);
+        if (classes.len > 0) try file_classes.append(arena, .{ .file = fpath, .classes = classes });
+        if (findFileNode(files, fpath)) |node| {
+            if (node.lines > max_file_lines.*) max_file_lines.* = node.lines;
+        }
+        for (funcs) |func| {
+            if (func.line_count > max_fn_lines.*) max_fn_lines.* = func.line_count;
+        }
+    }
+}
+
 /// Run walker + graph builder + function extraction + health metrics.
 /// All allocations come from `arena` (caller-owned).
 fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
@@ -414,13 +469,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     defer source_contents.deinit(arena);
     var contents_by_path = std.StringHashMap([]const u8).init(arena);
     defer contents_by_path.deinit();
-    for (file_paths) |fpath| {
-        const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
-        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
-        if (@as(u64, settings.max_parse_size_kb) * 1024 < contents.len) return error.FileTooLarge;
-        try source_contents.append(arena, contents);
-        try contents_by_path.put(fpath, contents);
-    }
+    try loadSourceContents(arena, io, path, settings.max_parse_size_kb, file_paths, &source_contents, &contents_by_path);
     const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRootWithContents(
         arena,
         io,
@@ -431,33 +480,22 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     var source_files = std.ArrayList(core.types.FileNode).empty;
     defer source_files.deinit(arena);
-    for (file_paths) |fpath| {
-        const node = findFileNode(files, fpath) orelse return error.FileNotFound;
-        try source_files.append(arena, node.*);
-    }
+    try collectSourceNodes(arena, files, file_paths, &source_files);
 
-    // Extract functions per file; track size extremes
     var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
     var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
     var max_file_lines: u32 = 0;
     var max_fn_lines: u32 = 0;
-    for (file_paths, source_contents.items) |fpath, contents| {
-        const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
-        const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
-        try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
-
-        const classes = try analysis.classes.ClassExtractor.extract(arena, contents, lang);
-        if (classes.len > 0) {
-            try file_classes.append(arena, .{ .file = fpath, .classes = classes });
-        }
-
-        if (findFileNode(files, fpath)) |node| {
-            if (node.lines > max_file_lines) max_file_lines = node.lines;
-        }
-        for (funcs) |f| {
-            if (f.line_count > max_fn_lines) max_fn_lines = f.line_count;
-        }
-    }
+    try extractFunctionData(
+        arena,
+        files,
+        file_paths,
+        source_contents.items,
+        &file_funcs,
+        &file_classes,
+        &max_file_lines,
+        &max_fn_lines,
+    );
 
     // Build call graph from extracted functions + import edges
     const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdgesWithLimit(
@@ -482,9 +520,30 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         inherit_edges,
         file_funcs.items,
     );
-    const depth_path = try buildDepthPath(arena, file_paths, import_edges);
-    const hotspots = try collectHotspots(arena, file_funcs.items);
+    return finalizeAnalysis(
+        arena,
+        report,
+        import_edges,
+        call_edges,
+        inherit_edges,
+        file_paths,
+        file_funcs.items,
+        max_file_lines,
+        max_fn_lines,
+    );
+}
 
+fn finalizeAnalysis(
+    arena: std.mem.Allocator,
+    report: metrics.HealthReport,
+    import_edges: []const core.types.ImportEdge,
+    call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
+    file_paths: []const []const u8,
+    file_funcs: []const metrics.dead_code.FileFuncs,
+    max_file_lines: u32,
+    max_fn_lines: u32,
+) !Analysis {
     return .{
         .report = report,
         .import_edges = import_edges,
@@ -493,8 +552,8 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         .file_paths = file_paths,
         .max_file_lines = max_file_lines,
         .max_fn_lines = max_fn_lines,
-        .depth_path = depth_path,
-        .hotspots = hotspots,
+        .depth_path = try buildDepthPath(arena, file_paths, import_edges),
+        .hotspots = try collectHotspots(arena, file_funcs),
     };
 }
 
@@ -612,49 +671,38 @@ fn buildDepthPath(
     return try path.toOwnedSlice(allocator);
 }
 
-fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    if (!json_flag) std.debug.print("Scanning {s}...\n", .{path});
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-
-    const result = try runAnalysis(arena.allocator(), io, path);
+fn makeJsonScan(path: []const u8, result: Analysis) JsonScan {
     const report = result.report;
+    return .{
+        .schema_version = json_schema_version,
+        .tool_version = tool_version,
+        .ok = true,
+        .root = path,
+        .units = jsonUnits(),
+        .quality_signal = report.quality_signal_int,
+        .bottleneck = report.bottleneck,
+        .files = report.file_count,
+        .lines = report.line_count,
+        .import_edges = @intCast(result.import_edges.len),
+        .call_edges = @intCast(result.call_edges.len),
+        .inherit_edges = @intCast(result.inherit_edges.len),
+        .functions = report.total_functions,
+        .dead_functions = report.dead_functions,
+        .duplicate_functions = report.duplicate_functions,
+        .root_causes = .{
+            .modularity = scoreInt(report.root_cause_scores.modularity),
+            .acyclicity = scoreInt(report.root_cause_scores.acyclicity),
+            .depth = scoreInt(report.root_cause_scores.depth),
+            .equality = scoreInt(report.root_cause_scores.equality),
+            .redundancy = scoreInt(report.root_cause_scores.redundancy),
+        },
+        .depth_path = result.depth_path,
+        .hotspots = result.hotspots,
+    };
+}
 
-    if (json_flag) {
-        const payload = JsonScan{
-            .schema_version = json_schema_version,
-            .tool_version = tool_version,
-            .ok = true,
-            .root = path,
-            .units = jsonUnits(),
-            .quality_signal = report.quality_signal_int,
-            .bottleneck = report.bottleneck,
-            .files = report.file_count,
-            .lines = report.line_count,
-            .import_edges = @intCast(result.import_edges.len),
-            .call_edges = @intCast(result.call_edges.len),
-            .inherit_edges = @intCast(result.inherit_edges.len),
-            .functions = report.total_functions,
-            .dead_functions = report.dead_functions,
-            .duplicate_functions = report.duplicate_functions,
-            .root_causes = .{
-                .modularity = scoreInt(report.root_cause_scores.modularity),
-                .acyclicity = scoreInt(report.root_cause_scores.acyclicity),
-                .depth = scoreInt(report.root_cause_scores.depth),
-                .equality = scoreInt(report.root_cause_scores.equality),
-                .redundancy = scoreInt(report.root_cause_scores.redundancy),
-            },
-            .depth_path = result.depth_path,
-            .hotspots = result.hotspots,
-        };
-        try printJsonStdout(io, arena.allocator(), payload);
-        return;
-    }
-
+fn printHumanScan(result: Analysis) void {
+    const report = result.report;
     std.debug.print("Found {d} files, {d} lines\n", .{ report.file_count, report.line_count });
     std.debug.print("\n", .{});
     std.debug.print("Quality Signal: {d}/10000\n", .{report.quality_signal_int});
@@ -671,26 +719,11 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     });
     std.debug.print("\n", .{});
     std.debug.print("Root Causes:\n", .{});
-    std.debug.print("  Modularity:  {d:.3} (raw Q={d:.3})\n", .{
-        report.root_cause_scores.modularity,
-        report.root_cause_raw.modularity_q,
-    });
-    std.debug.print("  Acyclicity:  {d:.3} (cycles={d})\n", .{
-        report.root_cause_scores.acyclicity,
-        report.root_cause_raw.cycle_count,
-    });
-    std.debug.print("  Depth:       {d:.3} (max={d})\n", .{
-        report.root_cause_scores.depth,
-        report.root_cause_raw.max_depth,
-    });
-    std.debug.print("  Equality:    {d:.3} (gini={d:.3})\n", .{
-        report.root_cause_scores.equality,
-        report.root_cause_raw.complexity_gini,
-    });
-    std.debug.print("  Redundancy:  {d:.3} (ratio={d:.3})\n", .{
-        report.root_cause_scores.redundancy,
-        report.root_cause_raw.redundancy_ratio,
-    });
+    std.debug.print("  Modularity:  {d:.3} (raw Q={d:.3})\n", .{ report.root_cause_scores.modularity, report.root_cause_raw.modularity_q });
+    std.debug.print("  Acyclicity:  {d:.3} (cycles={d})\n", .{ report.root_cause_scores.acyclicity, report.root_cause_raw.cycle_count });
+    std.debug.print("  Depth:       {d:.3} (max={d})\n", .{ report.root_cause_scores.depth, report.root_cause_raw.max_depth });
+    std.debug.print("  Equality:    {d:.3} (gini={d:.3})\n", .{ report.root_cause_scores.equality, report.root_cause_raw.complexity_gini });
+    std.debug.print("  Redundancy:  {d:.3} (ratio={d:.3})\n", .{ report.root_cause_scores.redundancy, report.root_cause_raw.redundancy_ratio });
     if (result.depth_path.len != 0) {
         std.debug.print("Longest path: ", .{});
         for (result.depth_path, 0..) |node_path, index| {
@@ -702,14 +735,22 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     if (result.hotspots.len != 0) {
         std.debug.print("Function hotspots:\n", .{});
         for (result.hotspots) |hotspot| {
-            std.debug.print("  {s}:{s} lines={d} cyclomatic={d} cognitive={d}\n", .{
-                hotspot.file,
-                hotspot.name,
-                hotspot.lines,
-                hotspot.cyclomatic,
-                hotspot.cognitive,
-            });
+            std.debug.print("  {s}:{s} lines={d} cyclomatic={d} cognitive={d}\n", .{ hotspot.file, hotspot.name, hotspot.lines, hotspot.cyclomatic, hotspot.cognitive });
         }
+    }
+}
+
+fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    if (!json_flag) std.debug.print("Scanning {s}...\n", .{path});
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const result = try runAnalysis(arena.allocator(), io, path);
+    if (json_flag) {
+        try printJsonStdout(io, arena.allocator(), makeJsonScan(path, result));
+    } else {
+        printHumanScan(result);
     }
 }
 

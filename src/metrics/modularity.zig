@@ -53,45 +53,14 @@ pub fn computeModularityQ(
         try k_in.append(allocator, 0);
     }
 
-    // Count edges within modules and update degrees
-    var actual_intra: f64 = 0.0;
-
-    for (import_edges) |edge| {
-        const from_id = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
-        const to_id = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
-
-        k_out.items[from_id] += 1;
-        k_in.items[to_id] += 1;
-
-        // Check if same module (same file = same module by default)
-        if (std.mem.eql(u8, core.path_utils.moduleOf(edge.from_file), core.path_utils.moduleOf(edge.to_file))) {
-            actual_intra += 1.0;
-        }
-    }
-
-    for (call_edges) |edge| {
-        const from_id = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
-        const to_id = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
-
-        k_out.items[from_id] += 1;
-        k_in.items[to_id] += 1;
-
-        if (std.mem.eql(u8, core.path_utils.moduleOf(edge.from_file), core.path_utils.moduleOf(edge.to_file))) {
-            actual_intra += 1.0;
-        }
-    }
-
-    for (inherit_edges) |edge| {
-        const from_id = node_index.get(edge.child_file) orelse return error.InvalidGraphEdge;
-        const to_id = node_index.get(edge.parent_file) orelse return error.InvalidGraphEdge;
-
-        k_out.items[from_id] += 1;
-        k_in.items[to_id] += 1;
-
-        if (std.mem.eql(u8, core.path_utils.moduleOf(edge.child_file), core.path_utils.moduleOf(edge.parent_file))) {
-            actual_intra += 1.0;
-        }
-    }
+    const actual_intra = try accumulateEdges(
+        &node_index,
+        k_out.items,
+        k_in.items,
+        import_edges,
+        call_edges,
+        inherit_edges,
+    );
 
     // Compute expected intra-module edges per module
     // Group nodes by module
@@ -127,6 +96,42 @@ pub fn computeModularityQ(
 
     // Clamp to [-0.5, 1.0]
     return @max(-0.5, @min(1.0, q));
+}
+
+fn accumulateEdges(
+    node_index: *const std.StringHashMap(usize),
+    k_out: []u32,
+    k_in: []u32,
+    import_edges: []const core.types.ImportEdge,
+    call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
+) !f64 {
+    var actual_intra: f64 = 0.0;
+    for (import_edges) |edge| {
+        actual_intra += try accumulateEdge(node_index, k_out, k_in, edge.from_file, edge.to_file);
+    }
+    for (call_edges) |edge| {
+        actual_intra += try accumulateEdge(node_index, k_out, k_in, edge.from_file, edge.to_file);
+    }
+    for (inherit_edges) |edge| {
+        actual_intra += try accumulateEdge(node_index, k_out, k_in, edge.child_file, edge.parent_file);
+    }
+    return actual_intra;
+}
+
+fn accumulateEdge(
+    node_index: *const std.StringHashMap(usize),
+    k_out: []u32,
+    k_in: []u32,
+    from_file: []const u8,
+    to_file: []const u8,
+) !f64 {
+    const from_id = node_index.get(from_file) orelse return error.InvalidGraphEdge;
+    const to_id = node_index.get(to_file) orelse return error.InvalidGraphEdge;
+    k_out[from_id] += 1;
+    k_in[to_id] += 1;
+    if (std.mem.eql(u8, core.path_utils.moduleOf(from_file), core.path_utils.moduleOf(to_file))) return 1.0;
+    return 0.0;
 }
 
 /// Compute modularity score: (Q + 0.5) / 1.5

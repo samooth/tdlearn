@@ -1,6 +1,117 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const Extension = struct { ext: []const u8, lang: []const u8 };
+const Filename = struct { name: []const u8, lang: []const u8 };
+
+const extension_entries = [_]Extension{
+    .{ .ext = "zig", .lang = "zig" },
+    .{ .ext = "zon", .lang = "zig" },
+    .{ .ext = "rs", .lang = "rust" },
+    .{ .ext = "py", .lang = "python" },
+    .{ .ext = "pyi", .lang = "python" },
+    .{ .ext = "js", .lang = "javascript" },
+    .{ .ext = "jsx", .lang = "javascript" },
+    .{ .ext = "mjs", .lang = "javascript" },
+    .{ .ext = "ts", .lang = "typescript" },
+    .{ .ext = "tsx", .lang = "typescript" },
+    .{ .ext = "mts", .lang = "typescript" },
+    .{ .ext = "c", .lang = "c" },
+    .{ .ext = "h", .lang = "c" },
+    .{ .ext = "cpp", .lang = "cpp" },
+    .{ .ext = "hpp", .lang = "cpp" },
+    .{ .ext = "cc", .lang = "cpp" },
+    .{ .ext = "cxx", .lang = "cpp" },
+    .{ .ext = "hxx", .lang = "cpp" },
+    .{ .ext = "cs", .lang = "c_sharp" },
+    .{ .ext = "java", .lang = "java" },
+    .{ .ext = "kt", .lang = "kotlin" },
+    .{ .ext = "kts", .lang = "kotlin" },
+    .{ .ext = "scala", .lang = "scala" },
+    .{ .ext = "go", .lang = "go" },
+    .{ .ext = "swift", .lang = "swift" },
+    .{ .ext = "rb", .lang = "ruby" },
+    .{ .ext = "erb", .lang = "ruby" },
+    .{ .ext = "php", .lang = "php" },
+    .{ .ext = "ex", .lang = "elixir" },
+    .{ .ext = "exs", .lang = "elixir" },
+    .{ .ext = "erl", .lang = "erlang" },
+    .{ .ext = "hrl", .lang = "erlang" },
+    .{ .ext = "hs", .lang = "haskell" },
+    .{ .ext = "lua", .lang = "lua" },
+    .{ .ext = "pl", .lang = "perl" },
+    .{ .ext = "pm", .lang = "perl" },
+    .{ .ext = "sh", .lang = "bash" },
+    .{ .ext = "bash", .lang = "bash" },
+    .{ .ext = "zsh", .lang = "bash" },
+    .{ .ext = "html", .lang = "html" },
+    .{ .ext = "htm", .lang = "html" },
+    .{ .ext = "css", .lang = "css" },
+    .{ .ext = "scss", .lang = "scss" },
+    .{ .ext = "sass", .lang = "scss" },
+    .{ .ext = "less", .lang = "css" },
+    .{ .ext = "json", .lang = "json" },
+    .{ .ext = "yaml", .lang = "yaml" },
+    .{ .ext = "yml", .lang = "yaml" },
+    .{ .ext = "toml", .lang = "toml" },
+    .{ .ext = "xml", .lang = "xml" },
+    .{ .ext = "csv", .lang = "csv" },
+    .{ .ext = "ini", .lang = "ini" },
+    .{ .ext = "env", .lang = "dotenv" },
+    .{ .ext = "md", .lang = "markdown" },
+    .{ .ext = "rst", .lang = "markdown" },
+    .{ .ext = "txt", .lang = "text" },
+    .{ .ext = "makefile", .lang = "makefile" },
+    .{ .ext = "cmake", .lang = "cmake" },
+    .{ .ext = "sql", .lang = "sql" },
+    .{ .ext = "proto", .lang = "protobuf" },
+    .{ .ext = "dockerfile", .lang = "dockerfile" },
+    .{ .ext = "nix", .lang = "nix" },
+    .{ .ext = "dart", .lang = "dart" },
+    .{ .ext = "jl", .lang = "julia" },
+    .{ .ext = "r", .lang = "r" },
+    .{ .ext = "R", .lang = "r" },
+    .{ .ext = "nim", .lang = "nim" },
+    .{ .ext = "cr", .lang = "crystal" },
+    .{ .ext = "v", .lang = "v" },
+    .{ .ext = "ml", .lang = "ocaml" },
+    .{ .ext = "mli", .lang = "ocaml" },
+    .{ .ext = "fs", .lang = "f_sharp" },
+    .{ .ext = "fsi", .lang = "f_sharp" },
+    .{ .ext = "clj", .lang = "clojure" },
+    .{ .ext = "cljs", .lang = "clojure" },
+    .{ .ext = "groovy", .lang = "groovy" },
+    .{ .ext = "sol", .lang = "solidity" },
+    .{ .ext = "gd", .lang = "gdscript" },
+    .{ .ext = "glsl", .lang = "glsl" },
+    .{ .ext = "vert", .lang = "glsl" },
+    .{ .ext = "frag", .lang = "glsl" },
+    .{ .ext = "hcl", .lang = "hcl" },
+    .{ .ext = "tf", .lang = "hcl" },
+    .{ .ext = "vue", .lang = "vue" },
+    .{ .ext = "svelte", .lang = "svelte" },
+    .{ .ext = "m", .lang = "objectivec" },
+    .{ .ext = "mm", .lang = "objectivec" },
+    .{ .ext = "pas", .lang = "pascal" },
+    .{ .ext = "pp", .lang = "pascal" },
+    .{ .ext = "asm", .lang = "assembly" },
+    .{ .ext = "s", .lang = "assembly" },
+    .{ .ext = "cob", .lang = "cobol" },
+    .{ .ext = "ps1", .lang = "powershell" },
+};
+
+const filename_entries = [_]Filename{
+    .{ .name = "Makefile", .lang = "makefile" },
+    .{ .name = "Dockerfile", .lang = "dockerfile" },
+    .{ .name = "Gemfile", .lang = "ruby" },
+    .{ .name = "Rakefile", .lang = "ruby" },
+    .{ .name = "CMakeLists.txt", .lang = "cmake" },
+    .{ .name = "Cargo.toml", .lang = "toml" },
+    .{ .name = "build.zig", .lang = "zig" },
+    .{ .name = "build.zig.zon", .lang = "zig" },
+    .{ .name = "Justfile", .lang = "just" },
+};
+
 /// Language detection from file extensions.
 /// Maps extensions to language names for display, coloring, and metric thresholds.
 /// No tree-sitter integration yet — pure string matching.
@@ -17,168 +128,11 @@ pub const LangRegistry = struct {
         var filename_map = std.StringHashMap([]const u8).init(allocator);
         errdefer filename_map.deinit();
 
-        // Register all known extensions
-        const extensions = [_]struct { ext: []const u8, lang: []const u8 }{
-            // Zig
-            .{ .ext = "zig", .lang = "zig" },
-            .{ .ext = "zon", .lang = "zig" },
-            // Rust
-            .{ .ext = "rs", .lang = "rust" },
-            // Python
-            .{ .ext = "py", .lang = "python" },
-            .{ .ext = "pyi", .lang = "python" },
-            // JavaScript / TypeScript
-            .{ .ext = "js", .lang = "javascript" },
-            .{ .ext = "jsx", .lang = "javascript" },
-            .{ .ext = "mjs", .lang = "javascript" },
-            .{ .ext = "ts", .lang = "typescript" },
-            .{ .ext = "tsx", .lang = "typescript" },
-            .{ .ext = "mts", .lang = "typescript" },
-            // C / C++
-            .{ .ext = "c", .lang = "c" },
-            .{ .ext = "h", .lang = "c" },
-            .{ .ext = "cpp", .lang = "cpp" },
-            .{ .ext = "hpp", .lang = "cpp" },
-            .{ .ext = "cc", .lang = "cpp" },
-            .{ .ext = "cxx", .lang = "cpp" },
-            .{ .ext = "hxx", .lang = "cpp" },
-            // C#
-            .{ .ext = "cs", .lang = "c_sharp" },
-            // Java
-            .{ .ext = "java", .lang = "java" },
-            .{ .ext = "kt", .lang = "kotlin" },
-            .{ .ext = "kts", .lang = "kotlin" },
-            .{ .ext = "scala", .lang = "scala" },
-            // Go
-            .{ .ext = "go", .lang = "go" },
-            // Swift
-            .{ .ext = "swift", .lang = "swift" },
-            // Ruby
-            .{ .ext = "rb", .lang = "ruby" },
-            .{ .ext = "erb", .lang = "ruby" },
-            // PHP
-            .{ .ext = "php", .lang = "php" },
-            // Elixir
-            .{ .ext = "ex", .lang = "elixir" },
-            .{ .ext = "exs", .lang = "elixir" },
-            // Erlang
-            .{ .ext = "erl", .lang = "erlang" },
-            .{ .ext = "hrl", .lang = "erlang" },
-            // Haskell
-            .{ .ext = "hs", .lang = "haskell" },
-            // Lua
-            .{ .ext = "lua", .lang = "lua" },
-            // Perl
-            .{ .ext = "pl", .lang = "perl" },
-            .{ .ext = "pm", .lang = "perl" },
-            // Shell
-            .{ .ext = "sh", .lang = "bash" },
-            .{ .ext = "bash", .lang = "bash" },
-            .{ .ext = "zsh", .lang = "bash" },
-            // Web
-            .{ .ext = "html", .lang = "html" },
-            .{ .ext = "htm", .lang = "html" },
-            .{ .ext = "css", .lang = "css" },
-            .{ .ext = "scss", .lang = "scss" },
-            .{ .ext = "sass", .lang = "scss" },
-            .{ .ext = "less", .lang = "css" },
-            // Data
-            .{ .ext = "json", .lang = "json" },
-            .{ .ext = "yaml", .lang = "yaml" },
-            .{ .ext = "yml", .lang = "yaml" },
-            .{ .ext = "toml", .lang = "toml" },
-            .{ .ext = "xml", .lang = "xml" },
-            .{ .ext = "csv", .lang = "csv" },
-            // Config
-            .{ .ext = "ini", .lang = "ini" },
-            .{ .ext = "env", .lang = "dotenv" },
-            // Docs
-            .{ .ext = "md", .lang = "markdown" },
-            .{ .ext = "rst", .lang = "markdown" },
-            .{ .ext = "txt", .lang = "text" },
-            // Build
-            .{ .ext = "makefile", .lang = "makefile" },
-            .{ .ext = "cmake", .lang = "cmake" },
-            // SQL
-            .{ .ext = "sql", .lang = "sql" },
-            // Protobuf
-            .{ .ext = "proto", .lang = "protobuf" },
-            // Docker
-            .{ .ext = "dockerfile", .lang = "dockerfile" },
-            // Nix
-            .{ .ext = "nix", .lang = "nix" },
-            // Dart
-            .{ .ext = "dart", .lang = "dart" },
-            // Julia
-            .{ .ext = "jl", .lang = "julia" },
-            // R
-            .{ .ext = "r", .lang = "r" },
-            .{ .ext = "R", .lang = "r" },
-            // Nim
-            .{ .ext = "nim", .lang = "nim" },
-            // Crystal
-            .{ .ext = "cr", .lang = "crystal" },
-            // V
-            .{ .ext = "v", .lang = "v" },
-            // OCaml
-            .{ .ext = "ml", .lang = "ocaml" },
-            .{ .ext = "mli", .lang = "ocaml" },
-            // F#
-            .{ .ext = "fs", .lang = "f_sharp" },
-            .{ .ext = "fsi", .lang = "f_sharp" },
-            // Clojure
-            .{ .ext = "clj", .lang = "clojure" },
-            .{ .ext = "cljs", .lang = "clojure" },
-            // Groovy
-            .{ .ext = "groovy", .lang = "groovy" },
-            // Solidity
-            .{ .ext = "sol", .lang = "solidity" },
-            // GDScript
-            .{ .ext = "gd", .lang = "gdscript" },
-            // GLSL
-            .{ .ext = "glsl", .lang = "glsl" },
-            .{ .ext = "vert", .lang = "glsl" },
-            .{ .ext = "frag", .lang = "glsl" },
-            // HCL
-            .{ .ext = "hcl", .lang = "hcl" },
-            .{ .ext = "tf", .lang = "hcl" },
-            // Vue
-            .{ .ext = "vue", .lang = "vue" },
-            // Svelte
-            .{ .ext = "svelte", .lang = "svelte" },
-            // Objective-C
-            .{ .ext = "m", .lang = "objectivec" },
-            .{ .ext = "mm", .lang = "objectivec" },
-            // Pascal
-            .{ .ext = "pas", .lang = "pascal" },
-            .{ .ext = "pp", .lang = "pascal" },
-            // Assembly
-            .{ .ext = "asm", .lang = "assembly" },
-            .{ .ext = "s", .lang = "assembly" },
-            // COBOL
-            .{ .ext = "cob", .lang = "cobol" },
-            // PowerShell
-            .{ .ext = "ps1", .lang = "powershell" },
-        };
-
-        for (extensions) |entry| {
+        for (extension_entries) |entry| {
             _ = try map.put(entry.ext, entry.lang);
         }
 
-        // Register filename-based detection (no extension)
-        const filenames = [_]struct { name: []const u8, lang: []const u8 }{
-            .{ .name = "Makefile", .lang = "makefile" },
-            .{ .name = "Dockerfile", .lang = "dockerfile" },
-            .{ .name = "Gemfile", .lang = "ruby" },
-            .{ .name = "Rakefile", .lang = "ruby" },
-            .{ .name = "CMakeLists.txt", .lang = "cmake" },
-            .{ .name = "Cargo.toml", .lang = "toml" },
-            .{ .name = "build.zig", .lang = "zig" },
-            .{ .name = "build.zig.zon", .lang = "zig" },
-            .{ .name = "Justfile", .lang = "just" },
-        };
-
-        for (filenames) |entry| {
+        for (filename_entries) |entry| {
             _ = try filename_map.put(entry.name, entry.lang);
         }
 
