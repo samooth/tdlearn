@@ -24,6 +24,8 @@ Imports, functions, calls, and inheritance are extracted line-based for Zig, Rus
 
 ## Build
 
+Requiere Zig `0.16.0` estable.
+
 ```bash
 zig build
 ```

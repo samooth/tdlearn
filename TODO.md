@@ -230,12 +230,12 @@ Prioridades:
 - [ ] Ejecutar Debug y ReleaseSafe en Linux, macOS y Windows.
 - [ ] Añadir benchmarks para repositorios grandes y verificar que no hay crecimiento cuadrático.
 
-### [ ] TEST-002 — Completar la matriz de lenguajes
+### [x] TEST-002 — Completar la matriz de lenguajes
 
-- [ ] Mantener fixtures para Zig, Rust, Python, JavaScript/TypeScript, Go y C/C++.
-- [ ] Añadir casos de comentarios, strings, imports agrupados/multilínea, aliases, métodos, genéricos y macros.
-- [ ] Ejecutar tests positivos y negativos para evitar edges, funciones o ciclos inventados.
-- [ ] Documentar explícitamente cualquier constructo no soportado por el parser line-based.
+- [x] Mantener fixtures para Zig, Rust, Python, JavaScript/TypeScript, Go y C/C++.
+- [x] Añadir casos de comentarios, strings, imports agrupados/multilínea, aliases, métodos, genéricos y macros.
+- [x] Ejecutar tests positivos y negativos para evitar edges, funciones o ciclos inventados.
+- [x] Documentar explícitamente cualquier constructo no soportado por el parser line-based.
 
 ### [ ] PERF-001 — Eliminar límites y cuellos de botella
 

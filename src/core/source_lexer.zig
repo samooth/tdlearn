@@ -81,7 +81,9 @@ pub fn sanitizeLine(
             index += 2;
             continue;
         }
-        if (language == .python and hasTripleQuote(raw, index, raw[index])) {
+        if (language == .python and (raw[index] == '"' or raw[index] == '\'') and
+            hasTripleQuote(raw, index, raw[index]))
+        {
             try appendLiteral(allocator, output, raw[index .. index + 3], mode);
             state.triple_quote = raw[index];
             index += 3;

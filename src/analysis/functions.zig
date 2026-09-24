@@ -14,22 +14,13 @@ pub const FunctionExtractor = struct {
 
         var lines = std.mem.splitScalar(u8, contents, '\n');
         var line_no: u32 = 0;
-        var in_block_comment = false;
+        var scan_state = ComplexityState{};
         while (lines.next()) |raw_line| {
             line_no += 1;
-            const line = std.mem.trim(u8, raw_line, " \t\r");
-
-            // Track block comments (/* ... */ — C-family, Rust, JS, Zig)
-            if (in_block_comment) {
-                if (std.mem.indexOf(u8, line, "*/")) |_| in_block_comment = false;
-                continue;
-            }
-            if (std.mem.startsWith(u8, line, "//")) continue;
-            if (std.mem.startsWith(u8, line, "#") and !std.mem.eql(u8, lang, "c") and !std.mem.eql(u8, lang, "cpp")) continue;
-            if (std.mem.startsWith(u8, line, "/*")) {
-                if (std.mem.indexOf(u8, line, "*/") == null) in_block_comment = true;
-                continue;
-            }
+            var code = std.ArrayList(u8).empty;
+            defer code.deinit(allocator);
+            sanitizeLine(allocator, &code, raw_line, lang, &scan_state) catch continue;
+            const line = std.mem.trim(u8, code.items, " \t\r");
 
             const base_decl = detectDecl(line, lang) orelse continue;
             var decl = base_decl;
@@ -42,9 +33,14 @@ pub const FunctionExtractor = struct {
             const end_line = findBodyEnd(contents, line_no, decl.open_brace, start_indent) catch line_no;
             const complexity = computeComplexity(allocator, contents, line_no, end_line, lang);
             const is_public = decl.pub_keyword;
+            var line_start: usize = 0;
+            while (line_start < raw_line.len and (raw_line[line_start] == ' ' or raw_line[line_start] == '\t')) : (line_start += 1) {}
+            const stable_offset = line_start + decl.name_offset;
+            if (stable_offset + decl.name.len > raw_line.len) continue;
+            const stable_name = raw_line[stable_offset .. stable_offset + decl.name.len];
 
             try funcs.append(allocator, .{
-                .name = decl.name,
+                .name = stable_name,
                 .start_line = line_no,
                 .end_line = end_line,
                 .line_count = end_line - line_no + 1,
@@ -61,10 +57,15 @@ pub const FunctionExtractor = struct {
 
     const Decl = struct {
         name: []const u8,
+        name_offset: usize,
         pub_keyword: bool,
         is_method: bool,
         open_brace: bool,
     };
+
+    fn nameOffset(line: []const u8, name: []const u8) usize {
+        return @intFromPtr(name.ptr) - @intFromPtr(line.ptr);
+    }
 
     const Complexity = struct {
         cyclomatic: u32 = 1,
@@ -112,6 +113,7 @@ pub const FunctionExtractor = struct {
         if (after.len == 0 or after[0] != '(') return null;
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = is_pub,
             .is_method = false, // Zig methods aren't distinguishable syntactically at line level
             .open_brace = true,
@@ -149,13 +151,18 @@ pub const FunctionExtractor = struct {
         rest = rest[3..];
         const name = scanIdentifier(rest) orelse return null;
         if (name.len == 0) return null;
-        const after = std.mem.trimStart(u8, rest[name.len..], " \t");
+        var after = std.mem.trimStart(u8, rest[name.len..], " \t");
+        if (after.len != 0 and after[0] == '<') {
+            const close = std.mem.indexOfScalar(u8, after, '>') orelse return null;
+            after = std.mem.trimStart(u8, after[close + 1 ..], " \t");
+        }
         if (after.len == 0 or after[0] != '(') return null;
         // Method heuristic: receiver &self or &mut self in params
         const is_method = std.mem.indexOf(u8, after, "&self") != null or
             std.mem.indexOf(u8, after, "self: ") != null;
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = is_pub,
             .is_method = is_method,
             .open_brace = true,
@@ -176,6 +183,7 @@ pub const FunctionExtractor = struct {
         // so check original line via name offset — skip; treat top-level only)
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = false, // Python has no visibility
             .is_method = false,
             .open_brace = false, // indentation-based
@@ -210,10 +218,15 @@ pub const FunctionExtractor = struct {
         if (rest.len == 0) return null;
         const name = scanIdentifier(rest) orelse return null;
         if (name.len == 0) return null;
-        const after = std.mem.trimStart(u8, rest[name.len..], " \t");
+        var after = std.mem.trimStart(u8, rest[name.len..], " \t");
+        if (after.len != 0 and after[0] == '<') {
+            const close = std.mem.indexOfScalar(u8, after, '>') orelse return null;
+            after = std.mem.trimStart(u8, after[close + 1 ..], " \t");
+        }
         if (after.len == 0 or after[0] != '(') return null;
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = is_pub,
             .is_method = false,
             .open_brace = true,
@@ -242,6 +255,7 @@ pub const FunctionExtractor = struct {
             is_method = true;
             return .{
                 .name = name,
+                .name_offset = nameOffset(line, name),
                 .pub_keyword = isExportedGo(name),
                 .is_method = is_method,
                 .open_brace = true,
@@ -253,6 +267,7 @@ pub const FunctionExtractor = struct {
         if (after.len == 0 or after[0] != '(') return null;
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = isExportedGo(name),
             .is_method = false,
             .open_brace = true,
@@ -295,6 +310,7 @@ pub const FunctionExtractor = struct {
 
         return .{
             .name = name,
+            .name_offset = nameOffset(line, name),
             .pub_keyword = !std.mem.startsWith(u8, line, "static "),
             .is_method = false,
             .open_brace = true,
@@ -762,6 +778,46 @@ test "js function extraction" {
     try std.testing.expectEqualStrings("generator", funcs[4].name);
 }
 
+test "language matrix handles typescript rust generics and c++" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const typescript =
+        \\export function typed(value: string): string { return value; }
+        \\function internal<T>(value: T): T { return value; }
+        \\interface Result { value: string }
+    ;
+    const ts_funcs = try FunctionExtractor.extract(arena.allocator(), typescript, "typescript");
+    try std.testing.expectEqual(@as(usize, 2), ts_funcs.len);
+    try std.testing.expectEqualStrings("typed", ts_funcs[0].name);
+    try std.testing.expect(ts_funcs[0].is_public);
+    try std.testing.expectEqualStrings("internal", ts_funcs[1].name);
+
+    const rust =
+        \\pub fn parse<T>(value: T) -> Option<T> {
+        \\    Some(value)
+        \\}
+    ;
+    const rust_funcs = try FunctionExtractor.extract(arena.allocator(), rust, "rust");
+    try std.testing.expectEqual(@as(usize, 1), rust_funcs.len);
+    try std.testing.expectEqualStrings("parse", rust_funcs[0].name);
+    try std.testing.expect(rust_funcs[0].is_public);
+
+    const cpp =
+        \\#include "header.hpp"
+        \\class Thing {
+        \\public:
+        \\    void method() {}
+        \\};
+        \\static int add(int a, int b) { return a + b; }
+    ;
+    const cpp_funcs = try FunctionExtractor.extract(arena.allocator(), cpp, "cpp");
+    try std.testing.expectEqual(@as(usize, 2), cpp_funcs.len);
+    try std.testing.expectEqualStrings("method", cpp_funcs[0].name);
+    try std.testing.expectEqualStrings("add", cpp_funcs[1].name);
+    try std.testing.expect(!cpp_funcs[1].is_public);
+}
+
 test "go function and method extraction" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -816,6 +872,36 @@ test "block comments skipped" {
     const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
     try std.testing.expectEqual(@as(usize, 1), funcs.len);
     try std.testing.expectEqualStrings("visible", funcs[0].name);
+}
+
+test "language matrix ignores declarations inside literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const python =
+        \\text = '''
+        \\def hidden():
+        \\    pass
+        \\'''
+        \\def visible():
+        \\    pass
+    ;
+    const python_funcs = try FunctionExtractor.extract(arena.allocator(), python, "python");
+    try std.testing.expectEqual(@as(usize, 1), python_funcs.len);
+    try std.testing.expectEqualStrings("visible", python_funcs[0].name);
+
+    const javascript =
+        \\const text = `function hidden() {}`;
+        \\function visible() {}
+    ;
+    const javascript_funcs = try FunctionExtractor.extract(arena.allocator(), javascript, "javascript");
+    try std.testing.expectEqual(@as(usize, 1), javascript_funcs.len);
+    try std.testing.expectEqualStrings("visible", javascript_funcs[0].name);
+
+    const zig = "const text = \"fn hidden() {}\";\nfn visible() {}\n";
+    const zig_funcs = try FunctionExtractor.extract(arena.allocator(), zig, "zig");
+    try std.testing.expectEqual(@as(usize, 1), zig_funcs.len);
+    try std.testing.expectEqualStrings("visible", zig_funcs[0].name);
 }
 
 test "unknown language yields nothing" {

@@ -468,6 +468,37 @@ test "c includes" {
     try std.testing.expectEqualStrings("dir/other.h", imports[2]);
 }
 
+test "typescript and cpp import variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const typescript =
+        \\import type { Config } from "types";
+        \\import {
+        \\    first,
+        \\    second,
+        \\} from "pkg";
+        \\const lazy = import("dynamic");
+        \\// import "commented";
+        \\const text = "import \\"literal\\"";
+    ;
+    const ts_imports = try ImportExtractor.extract(arena.allocator(), typescript, "typescript");
+    try std.testing.expectEqual(@as(usize, 3), ts_imports.len);
+    try std.testing.expectEqualStrings("types", ts_imports[0]);
+    try std.testing.expectEqualStrings("pkg", ts_imports[1]);
+    try std.testing.expectEqualStrings("dynamic", ts_imports[2]);
+
+    const cpp =
+        \\#include <vector>
+        \\#include "local.hpp"
+        \\/*
+        \\#include "commented.hpp"
+        \\*/
+    ;
+    const cpp_imports = try ImportExtractor.extract(arena.allocator(), cpp, "cpp");
+    try std.testing.expectEqual(@as(usize, 1), cpp_imports.len);
+    try std.testing.expectEqualStrings("local.hpp", cpp_imports[0]);
+}
+
 test "unknown language yields nothing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

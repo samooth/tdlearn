@@ -60,7 +60,7 @@ pub const Value = union(enum) {
 pub const Table = struct {
     name: []const u8,
     /// key → value (later keys override earlier ones)
-    values: std.StringArrayHashMap(Value),
+    values: std.StringArrayHashMapUnmanaged(Value) = .empty,
     /// array-of-tables entries: each is a list of (key, value) pairs
     array_entries: std.ArrayList([]const KV),
 
@@ -90,7 +90,7 @@ pub const Toml = struct {
 
     pub fn deinit(self: *Toml) void {
         for (self.tables.items) |*t| {
-            t.values.deinit();
+            t.values.deinit(self.arena.allocator());
             t.array_entries.deinit(self.allocator);
         }
         self.tables.deinit(self.allocator);
@@ -163,7 +163,7 @@ pub const Toml = struct {
                 }
             } else {
                 if (current_table.?.values.contains(key)) return error.DuplicateKey;
-                try current_table.?.values.put(key, value);
+                try current_table.?.values.put(sa, key, value);
             }
         }
     }
@@ -183,7 +183,7 @@ pub const Toml = struct {
         const owned_name = try sa.dupe(u8, name);
         try self.tables.append(self.allocator, .{
             .name = owned_name,
-            .values = std.StringArrayHashMap(Value).init(sa),
+            .values = .empty,
             .array_entries = .empty,
         });
         return &self.tables.items[self.tables.items.len - 1];
