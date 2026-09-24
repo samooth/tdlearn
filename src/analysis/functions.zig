@@ -314,11 +314,7 @@ pub const FunctionExtractor = struct {
         return false;
     }
 
-    const ComplexityState = struct {
-        block_comment: bool = false,
-        triple_quote: u8 = 0,
-        template: bool = false,
-    };
+    const ComplexityState = core.source_lexer.State;
 
     fn computeComplexity(
         allocator: Allocator,
@@ -368,99 +364,19 @@ pub const FunctionExtractor = struct {
         lang: []const u8,
         state: *ComplexityState,
     ) !void {
-        const kind = langKind(lang);
-        var index: usize = 0;
-        while (index < raw.len) {
-            if (state.block_comment) {
-                if (std.mem.startsWith(u8, raw[index..], "*/")) {
-                    try appendSpaces(allocator, output, 2);
-                    state.block_comment = false;
-                    index += 2;
-                } else {
-                    try output.append(allocator, ' ');
-                    index += 1;
-                }
-                continue;
-            }
-            if (state.triple_quote != 0) {
-                if (raw[index] == state.triple_quote and
-                    index + 2 < raw.len and raw[index + 1] == state.triple_quote and raw[index + 2] == state.triple_quote)
-                {
-                    try appendSpaces(allocator, output, 3);
-                    state.triple_quote = 0;
-                    index += 3;
-                } else {
-                    try output.append(allocator, ' ');
-                    index += 1;
-                }
-                continue;
-            }
-            if (state.template) {
-                if (raw[index] == '`') {
-                    try output.append(allocator, ' ');
-                    state.template = false;
-                } else {
-                    try output.append(allocator, ' ');
-                }
-                index += 1;
-                continue;
-            }
-
-            if (kind == .python and raw[index] == '#') {
-                try appendSpaces(allocator, output, raw.len - index);
-                break;
-            }
-            if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '/') {
-                try appendSpaces(allocator, output, raw.len - index);
-                break;
-            }
-            if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '*') {
-                try appendSpaces(allocator, output, 2);
-                state.block_comment = true;
-                index += 2;
-                continue;
-            }
-            if (kind == .python and index + 2 < raw.len and
-                ((raw[index] == '"' and raw[index + 1] == '"' and raw[index + 2] == '"') or
-                    (raw[index] == '\'' and raw[index + 1] == '\'' and raw[index + 2] == '\'')))
-            {
-                try appendSpaces(allocator, output, 3);
-                state.triple_quote = raw[index];
-                index += 3;
-                continue;
-            }
-            if (kind == .js and raw[index] == '`') {
-                try output.append(allocator, ' ');
-                state.template = true;
-                index += 1;
-                continue;
-            }
-            if (raw[index] == '"' or raw[index] == '\'') {
-                const quote = raw[index];
-                try output.append(allocator, ' ');
-                index += 1;
-                while (index < raw.len) {
-                    if (raw[index] == '\\' and index + 1 < raw.len) {
-                        try appendSpaces(allocator, output, 2);
-                        index += 2;
-                    } else if (raw[index] == quote) {
-                        try output.append(allocator, ' ');
-                        index += 1;
-                        break;
-                    } else {
-                        try output.append(allocator, ' ');
-                        index += 1;
-                    }
-                }
-                continue;
-            }
-            try output.append(allocator, raw[index]);
-            index += 1;
-        }
+        return core.source_lexer.sanitizeLine(allocator, output, raw, lexerLanguage(lang), .discard_literals, state);
     }
 
-    fn appendSpaces(allocator: Allocator, output: *std.ArrayList(u8), count: usize) !void {
-        try output.appendNTimes(allocator, ' ', count);
+    fn lexerLanguage(lang: []const u8) core.source_lexer.Language {
+        return switch (langKind(lang)) {
+            .zig => .zig,
+            .rust => .rust,
+            .python => .python,
+            .js => .javascript,
+            .go => .go,
+            .c => .c,
+            .other => .other,
+        };
     }
 
     fn countBranches(code: []const u8) u32 {

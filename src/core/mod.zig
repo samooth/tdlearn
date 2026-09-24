@@ -8,6 +8,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const toml = @import("toml.zig");
 pub const rules = @import("rules.zig");
 pub const baseline = @import("baseline.zig");
+pub const source_lexer = @import("source_lexer.zig");
 
 // Force test discovery in imported files (imports are lazy otherwise).
 test {

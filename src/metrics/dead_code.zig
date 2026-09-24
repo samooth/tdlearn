@@ -49,11 +49,7 @@ const DuplicateResult = struct {
     count: u32,
 };
 
-const ScanState = struct {
-    block_comment: bool = false,
-    triple_quote: u8 = 0,
-    template: bool = false,
-};
+const ScanState = core.source_lexer.State;
 
 /// Implicit entry point names that are never considered dead even if private.
 const implicit_entry_names = [_][]const u8{
@@ -75,7 +71,10 @@ pub fn analyze(
     defer records.deinit(allocator);
 
     var local_calls = std.ArrayList(LocalCall).empty;
-    defer local_calls.deinit(allocator);
+    defer {
+        for (local_calls.items) |call| allocator.free(call.callee);
+        local_calls.deinit(allocator);
+    }
 
     var referenced_names = std.StringHashMap(void).init(allocator);
     defer {
@@ -199,71 +198,27 @@ fn scanLocalLine(
     record_start: usize,
     calls: *std.ArrayList(LocalCall),
 ) !void {
+    var code = std.ArrayList(u8).empty;
+    defer code.deinit(allocator);
+    const language: core.source_lexer.Language = if (python) .python else .javascript;
+    try core.source_lexer.sanitizeLine(allocator, &code, line, language, .discard_literals, state);
+
     var index: usize = 0;
-    while (index < line.len) : (index += 1) {
-        if (state.block_comment) {
-            if (index + 1 < line.len and line[index] == '*' and line[index + 1] == '/') {
-                state.block_comment = false;
-                index += 1;
-            }
-            continue;
-        }
-        if (state.triple_quote != 0) {
-            if (index + 2 < line.len and line[index] == state.triple_quote and
-                line[index + 1] == state.triple_quote and line[index + 2] == state.triple_quote)
-            {
-                state.triple_quote = 0;
-                index += 2;
-            }
-            continue;
-        }
-        if (state.template) {
-            if (line[index] == '`') state.template = false;
-            continue;
-        }
-        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '/') break;
-        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '*') {
-            state.block_comment = true;
-            index += 1;
-            continue;
-        }
-        if (python and line[index] == '#') break;
-        if (index + 2 < line.len and
-            ((line[index] == '"' and line[index + 1] == '"' and line[index + 2] == '"') or
-                (line[index] == '\'' and line[index + 1] == '\'' and line[index + 2] == '\'')))
-        {
-            state.triple_quote = line[index];
-            index += 2;
-            continue;
-        }
-        if (line[index] == '"' or line[index] == '\'') {
-            const quote = line[index];
-            index += 1;
-            while (index < line.len) : (index += 1) {
-                if (line[index] == '\\' and index + 1 < line.len) {
-                    index += 1;
-                } else if (line[index] == quote) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if (line[index] == '`') {
-            state.template = true;
-            continue;
-        }
-        if (line[index] != '(') continue;
+    while (index < code.items.len) : (index += 1) {
+        if (code.items[index] != '(') continue;
 
         var end = index;
-        while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) end -= 1;
+        while (end > 0 and (code.items[end - 1] == ' ' or code.items[end - 1] == '\t')) end -= 1;
         var start = end;
-        while (start > 0 and isIdentChar(line[start - 1])) start -= 1;
+        while (start > 0 and isIdentChar(code.items[start - 1])) start -= 1;
         if (start == end) continue;
-        const name = line[start..end];
+        const name = code.items[start..end];
         if (isCallKeyword(name)) continue;
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
         try calls.append(allocator, .{
             .from = if (from) |func_index| record_start + func_index else null,
-            .callee = name,
+            .callee = owned_name,
         });
     }
 }
@@ -510,89 +465,8 @@ fn normalizeLine(
     python: bool,
     state: *ScanState,
 ) !void {
-    var index: usize = 0;
-    while (index < line.len) : (index += 1) {
-        if (state.block_comment) {
-            if (index + 1 < line.len and line[index] == '*' and line[index + 1] == '/') {
-                state.block_comment = false;
-                index += 1;
-            }
-            continue;
-        }
-        if (state.triple_quote != 0) {
-            if (index + 2 < line.len and line[index] == state.triple_quote and
-                line[index + 1] == state.triple_quote and line[index + 2] == state.triple_quote)
-            {
-                state.triple_quote = 0;
-                index += 2;
-            } else {
-                try output.append(allocator, line[index]);
-            }
-            continue;
-        }
-        if (state.template) {
-            if (line[index] == '`') {
-                try output.append(allocator, '`');
-                state.template = false;
-            } else {
-                try output.append(allocator, line[index]);
-            }
-            continue;
-        }
-        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '/') {
-            appendSeparator(allocator, output) catch return error.OutOfMemory;
-            break;
-        }
-        if (line[index] == '/' and index + 1 < line.len and line[index + 1] == '*') {
-            appendSeparator(allocator, output) catch return error.OutOfMemory;
-            state.block_comment = true;
-            index += 1;
-            continue;
-        }
-        if (python and line[index] == '#') {
-            appendSeparator(allocator, output) catch return error.OutOfMemory;
-            break;
-        }
-        if (index + 2 < line.len and
-            ((line[index] == '"' and line[index + 1] == '"' and line[index + 2] == '"') or
-                (line[index] == '\'' and line[index + 1] == '\'' and line[index + 2] == '\'')))
-        {
-            try output.append(allocator, line[index]);
-            state.triple_quote = line[index];
-            index += 2;
-            continue;
-        }
-        if (line[index] == '"' or line[index] == '\'') {
-            const quote = line[index];
-            try output.append(allocator, quote);
-            index += 1;
-            while (index < line.len) : (index += 1) {
-                try output.append(allocator, line[index]);
-                if (line[index] == '\\' and index + 1 < line.len) {
-                    index += 1;
-                    try output.append(allocator, line[index]);
-                } else if (line[index] == quote) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if (line[index] == '`') {
-            try output.append(allocator, '`');
-            state.template = true;
-            continue;
-        }
-        if (std.ascii.isWhitespace(line[index])) {
-            appendSeparator(allocator, output) catch return error.OutOfMemory;
-        } else {
-            try output.append(allocator, line[index]);
-        }
-    }
-}
-
-fn appendSeparator(allocator: Allocator, output: *std.ArrayList(u8)) !void {
-    if (output.items.len == 0 or output.items[output.items.len - 1] == ' ') return;
-    try output.append(allocator, ' ');
+    const language: core.source_lexer.Language = if (python) .python else .javascript;
+    return core.source_lexer.sanitizeLine(allocator, output, line, language, .preserve_literals, state);
 }
 
 fn collectSymbolReferences(
