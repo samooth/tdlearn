@@ -102,87 +102,84 @@ pub fn parseRules(allocator: Allocator, contents: []const u8) !RulesConfig {
     try validateToml(&toml);
 
     var config = RulesConfig{};
-
-    // [constraints]
-    if (toml.table("constraints")) |c| {
-        if (c.get("min_quality")) |v| config.constraints.min_quality = v.asFloat();
-        if (c.get("min_modularity")) |v| config.constraints.min_modularity = v.asFloat();
-        if (c.get("min_acyclicity")) |v| config.constraints.min_acyclicity = v.asFloat();
-        if (c.get("min_depth")) |v| config.constraints.min_depth = v.asFloat();
-        if (c.get("min_equality")) |v| config.constraints.min_equality = v.asFloat();
-        if (c.get("min_redundancy")) |v| config.constraints.min_redundancy = v.asFloat();
-        if (c.get("max_cycles")) |v| {
-            if (v.asInt()) |i| config.constraints.max_cycles = @intCast(@max(0, i));
-        }
-        if (c.get("max_file_lines")) |v| {
-            if (v.asInt()) |i| config.constraints.max_file_lines = @intCast(@max(0, i));
-        }
-        if (c.get("max_fn_lines")) |v| {
-            if (v.asInt()) |i| config.constraints.max_fn_lines = @intCast(@max(0, i));
-        }
-    }
-
-    // [[layers]] — needs an arena to outlive `toml`; use a leaky approach:
-    // copy strings into caller-owned arena passed as `allocator`.
-    if (toml.table("layers")) |l| {
-        var layers = std.ArrayList(RulesConfig.Layer).empty;
-        errdefer layers.deinit(allocator);
-        for (l.array_entries.items, 0..) |entry, idx| {
-            var name: []const u8 = "";
-            var paths: []const []const u8 = &.{};
-            var order: u32 = @intCast(idx);
-            for (entry) |kv| {
-                if (std.mem.eql(u8, kv.key, "name")) {
-                    if (kv.value.asString()) |s| name = try allocator.dupe(u8, s);
-                    try validateLayerName(name);
-                } else if (std.mem.eql(u8, kv.key, "paths")) {
-                    if (kv.value.asArray()) |arr| {
-                        var list = std.ArrayList([]const u8).empty;
-                        for (arr) |item| {
-                            if (item.asString()) |s| {
-                                try list.append(allocator, try normalizePattern(allocator, s));
-                            }
-                        }
-                        paths = try list.toOwnedSlice(allocator);
-                    }
-                } else if (std.mem.eql(u8, kv.key, "order")) {
-                    if (kv.value.asInt()) |i| order = @intCast(@max(0, i));
-                }
-            }
-            try layers.append(allocator, .{
-                .name = name,
-                .paths = paths,
-                .order = order,
-            });
-        }
-        config.layers = try layers.toOwnedSlice(allocator);
-    }
-
-    // [[boundaries]]
-    if (toml.table("boundaries")) |b| {
-        var boundaries = std.ArrayList(RulesConfig.Boundary).empty;
-        errdefer boundaries.deinit(allocator);
-        for (b.array_entries.items) |entry| {
-            var from: []const u8 = "";
-            var to: []const u8 = "";
-            var reason: []const u8 = "";
-            for (entry) |kv| {
-                if (std.mem.eql(u8, kv.key, "from")) {
-                    if (kv.value.asString()) |s| from = try normalizePattern(allocator, s);
-                } else if (std.mem.eql(u8, kv.key, "to")) {
-                    if (kv.value.asString()) |s| to = try normalizePattern(allocator, s);
-                } else if (std.mem.eql(u8, kv.key, "reason")) {
-                    if (kv.value.asString()) |s| reason = try allocator.dupe(u8, s);
-                }
-            }
-            try boundaries.append(allocator, .{ .from = from, .to = to, .reason = reason });
-        }
-        config.boundaries = try boundaries.toOwnedSlice(allocator);
-    }
-
+    parseConstraints(&toml, &config);
+    try parseLayers(allocator, &toml, &config);
+    try parseBoundaries(allocator, &toml, &config);
     try validateLayerConfig(config.layers);
     try validateBoundaryConfig(config.boundaries);
     return config;
+}
+
+fn parseConstraints(toml: *const toml_mod.Toml, config: *RulesConfig) void {
+    const table = toml.table("constraints") orelse return;
+    if (table.get("min_quality")) |value| config.constraints.min_quality = value.asFloat();
+    if (table.get("min_modularity")) |value| config.constraints.min_modularity = value.asFloat();
+    if (table.get("min_acyclicity")) |value| config.constraints.min_acyclicity = value.asFloat();
+    if (table.get("min_depth")) |value| config.constraints.min_depth = value.asFloat();
+    if (table.get("min_equality")) |value| config.constraints.min_equality = value.asFloat();
+    if (table.get("min_redundancy")) |value| config.constraints.min_redundancy = value.asFloat();
+    if (table.get("max_cycles")) |value| {
+        if (value.asInt()) |number| config.constraints.max_cycles = @intCast(@max(0, number));
+    }
+    if (table.get("max_file_lines")) |value| {
+        if (value.asInt()) |number| config.constraints.max_file_lines = @intCast(@max(0, number));
+    }
+    if (table.get("max_fn_lines")) |value| {
+        if (value.asInt()) |number| config.constraints.max_fn_lines = @intCast(@max(0, number));
+    }
+}
+
+fn parseLayers(allocator: Allocator, toml: *const toml_mod.Toml, config: *RulesConfig) !void {
+    const table = toml.table("layers") orelse return;
+    var layers = std.ArrayList(RulesConfig.Layer).empty;
+    errdefer layers.deinit(allocator);
+    for (table.array_entries.items, 0..) |entry, index| {
+        var name: []const u8 = "";
+        var paths: []const []const u8 = &.{};
+        var order: u32 = @intCast(index);
+        for (entry) |item| {
+            if (std.mem.eql(u8, item.key, "name")) {
+                if (item.value.asString()) |value| name = try allocator.dupe(u8, value);
+                try validateLayerName(name);
+            } else if (std.mem.eql(u8, item.key, "paths")) {
+                if (item.value.asArray()) |values| {
+                    var list = std.ArrayList([]const u8).empty;
+                    for (values) |value| {
+                        if (value.asString()) |pattern| {
+                            try list.append(allocator, try normalizePattern(allocator, pattern));
+                        }
+                    }
+                    paths = try list.toOwnedSlice(allocator);
+                }
+            } else if (std.mem.eql(u8, item.key, "order")) {
+                if (item.value.asInt()) |value| order = @intCast(@max(0, value));
+            }
+        }
+        try layers.append(allocator, .{ .name = name, .paths = paths, .order = order });
+    }
+    config.layers = try layers.toOwnedSlice(allocator);
+}
+
+fn parseBoundaries(allocator: Allocator, toml: *const toml_mod.Toml, config: *RulesConfig) !void {
+    const table = toml.table("boundaries") orelse return;
+    var boundaries = std.ArrayList(RulesConfig.Boundary).empty;
+    errdefer boundaries.deinit(allocator);
+    for (table.array_entries.items) |entry| {
+        var from: []const u8 = "";
+        var to: []const u8 = "";
+        var reason: []const u8 = "";
+        for (entry) |item| {
+            if (std.mem.eql(u8, item.key, "from")) {
+                if (item.value.asString()) |value| from = try normalizePattern(allocator, value);
+            } else if (std.mem.eql(u8, item.key, "to")) {
+                if (item.value.asString()) |value| to = try normalizePattern(allocator, value);
+            } else if (std.mem.eql(u8, item.key, "reason")) {
+                if (item.value.asString()) |value| reason = try allocator.dupe(u8, value);
+            }
+        }
+        try boundaries.append(allocator, .{ .from = from, .to = to, .reason = reason });
+    }
+    config.boundaries = try boundaries.toOwnedSlice(allocator);
 }
 
 fn validateLayerConfig(layers: []const RulesConfig.Layer) !void {
