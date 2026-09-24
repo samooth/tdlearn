@@ -555,6 +555,61 @@ fn nonEmptyString(value: toml_mod.Value) ![]const u8 {
     return string;
 }
 
+fn checkLayerRules(
+    allocator: Allocator,
+    layers: []const RulesConfig.Layer,
+    input: *const CheckInput,
+    violations: *std.ArrayList(Violation),
+    checked: *u32,
+) !void {
+    for (input.file_paths) |path| _ = try layerOf(layers, path);
+    if (layers.len < 2) return;
+    checked.* += 1;
+    for (input.import_edges) |edge| {
+        const from_layer = (try layerOf(layers, edge.from)) orelse continue;
+        const to_layer = (try layerOf(layers, edge.to)) orelse continue;
+        if (from_layer.order <= to_layer.order) continue;
+        const files = try allocator.alloc([]const u8, 2);
+        files[0] = edge.from;
+        files[1] = edge.to;
+        try violations.append(allocator, .{
+            .rule = "layer_order",
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "layer '{s}' (order {d}) imports '{s}' (order {d})", .{ from_layer.name, from_layer.order, to_layer.name, to_layer.order }),
+            .files = files,
+        });
+    }
+}
+
+fn checkBoundaryRules(
+    allocator: Allocator,
+    boundaries: []const RulesConfig.Boundary,
+    input: *const CheckInput,
+    violations: *std.ArrayList(Violation),
+    checked: *u32,
+) !void {
+    for (boundaries) |boundary| {
+        checked.* += 1;
+        for (input.import_edges) |edge| {
+            if (!globMatch(boundary.from, edge.from) or !globMatch(boundary.to, edge.to)) continue;
+            const files = try allocator.alloc([]const u8, 2);
+            files[0] = edge.from;
+            files[1] = edge.to;
+            try violations.append(allocator, .{
+                .rule = "boundary",
+                .severity = .err,
+                .message = try std.fmt.allocPrint(allocator, "{s} must not import {s}{s}{s}", .{
+                    edge.from,
+                    edge.to,
+                    if (boundary.reason.len > 0) " — " else "",
+                    boundary.reason,
+                }),
+                .files = files,
+            });
+        }
+    }
+}
+
 /// Check a scan against rules. Returns violations (empty = pass).
 pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *const CheckInput) !CheckResult {
     var violations = std.ArrayList(Violation).empty;
@@ -663,56 +718,8 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
         }
     }
 
-    for (input.file_paths) |path| _ = try layerOf(config.layers, path);
-
-    // ── Layer rule ──
-    // Semantics: HIGHER order = more foundational (core/infra at the top).
-    // Violation when the importing file's layer order is GREATER than the
-    // imported file's order (foundational code reaching up into presentation).
-    // Dependencies should flow downward: low order → high order.
-    if (config.layers.len >= 2) {
-        checked += 1;
-        for (input.import_edges) |edge| {
-            const from_layer = (try layerOf(config.layers, edge.from)) orelse continue;
-            const to_layer = (try layerOf(config.layers, edge.to)) orelse continue;
-            // Violation when importer sits at a HIGHER order (less foundational)
-            // than the imported module.
-            if (from_layer.order > to_layer.order) {
-                const files = try allocator.alloc([]const u8, 2);
-                files[0] = edge.from;
-                files[1] = edge.to;
-                try violations.append(allocator, .{
-                    .rule = "layer_order",
-                    .severity = .err,
-                    .message = try std.fmt.allocPrint(allocator, "layer '{s}' (order {d}) imports '{s}' (order {d})", .{ from_layer.name, from_layer.order, to_layer.name, to_layer.order }),
-                    .files = files,
-                });
-            }
-        }
-    }
-
-    // ── Boundary rules: deny from→to glob pairs ──
-    for (config.boundaries) |b| {
-        checked += 1;
-        for (input.import_edges) |edge| {
-            if (globMatch(b.from, edge.from) and globMatch(b.to, edge.to)) {
-                const files = try allocator.alloc([]const u8, 2);
-                files[0] = edge.from;
-                files[1] = edge.to;
-                try violations.append(allocator, .{
-                    .rule = "boundary",
-                    .severity = .err,
-                    .message = try std.fmt.allocPrint(allocator, "{s} must not import {s}{s}{s}", .{
-                        edge.from,
-                        edge.to,
-                        if (b.reason.len > 0) " — " else "",
-                        b.reason,
-                    }),
-                    .files = files,
-                });
-            }
-        }
-    }
+    try checkLayerRules(allocator, config.layers, input, &violations, &checked);
+    try checkBoundaryRules(allocator, config.boundaries, input, &violations, &checked);
 
     std.sort.heap(Violation, violations.items, {}, violationLessThan);
     var unique = std.ArrayList(Violation).empty;
