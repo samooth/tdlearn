@@ -49,6 +49,12 @@ const DuplicateResult = struct {
     count: u32,
 };
 
+fn deinitOwnedKeys(allocator: Allocator, map: *std.StringHashMap(void)) void {
+    var iterator = map.iterator();
+    while (iterator.next()) |entry| allocator.free(entry.key_ptr.*);
+    map.deinit();
+}
+
 const ScanState = core.source_lexer.State;
 
 /// Implicit entry point names that are never considered dead even if private.
@@ -76,12 +82,12 @@ pub fn analyze(
         local_calls.deinit(allocator);
     }
 
-    var referenced_names = std.StringHashMap(void).init(allocator);
-    defer {
-        var referenced_iter = referenced_names.iterator();
-        while (referenced_iter.next()) |entry| allocator.free(entry.key_ptr.*);
-        referenced_names.deinit();
-    }
+    var production_names = std.StringHashMap(void).init(allocator);
+    defer deinitOwnedKeys(allocator, &production_names);
+    var production_calls = std.StringHashMap(void).init(allocator);
+    defer deinitOwnedKeys(allocator, &production_calls);
+    var test_names = std.StringHashMap(void).init(allocator);
+    defer deinitOwnedKeys(allocator, &test_names);
 
     for (file_funcs) |ff| {
         const record_start = records.items.len;
@@ -93,7 +99,7 @@ pub fn analyze(
         }
         if (!isTestPath(ff.file)) {
             try collectLocalCalls(allocator, ff, record_start, &local_calls);
-            try collectSymbolReferences(allocator, ff, &referenced_names);
+            try collectSymbolReferences(allocator, ff, &production_names, &production_calls, &test_names);
         }
     }
 
@@ -103,7 +109,8 @@ pub fn analyze(
 
     for (records.items, 0..) |record, id| {
         if (isTestPath(record.file)) continue;
-        if (record.func.is_public or isRootFunction(record) or referenced_names.contains(record.func.name)) reachable[id] = true;
+        if (record.func.is_public or isRootFunction(record) or
+            production_names.contains(record.func.name) or test_names.contains(record.func.name)) reachable[id] = true;
     }
 
     var changed = true;
@@ -142,7 +149,14 @@ pub fn analyze(
         }
     }
 
-    const duplicates = try collectDuplicateFlags(allocator, file_funcs, records.items);
+    const duplicates = try collectDuplicateFlags(
+        allocator,
+        file_funcs,
+        records.items,
+        &production_names,
+        &production_calls,
+        &test_names,
+    );
     defer allocator.free(duplicates.flags);
     const duplicate_count = duplicates.count;
     const duplicate_flags = duplicates.flags;
@@ -411,6 +425,9 @@ fn collectDuplicateFlags(
     allocator: Allocator,
     file_funcs: []const FileFuncs,
     records: []const FunctionRecord,
+    production_names: *const std.StringHashMap(void),
+    production_calls: *const std.StringHashMap(void),
+    test_names: *const std.StringHashMap(void),
 ) !DuplicateResult {
     var body_groups = std.AutoHashMap(u64, std.ArrayList(BodyRecord)).init(allocator);
     defer {
@@ -431,6 +448,8 @@ fn collectDuplicateFlags(
         for (ff.funcs, 0..) |func, func_index| {
             const record = record_start + func_index;
             if (isTestPath(ff.file) or hasOverlappingFunction(ff.funcs, func_index)) continue;
+            if (!func.is_public and !func.is_method and test_names.contains(func.name) and
+                !production_names.contains(func.name) and !production_calls.contains(func.name)) continue;
             const body = try normalizeBody(allocator, ff.contents, func, ff.file) orelse continue;
             const hash = std.hash.Wyhash.hash(0, body);
             const gop = try body_groups.getOrPut(hash);
@@ -472,18 +491,33 @@ fn normalizeLine(
 fn collectSymbolReferences(
     allocator: Allocator,
     ff: FileFuncs,
-    names: *std.StringHashMap(void),
+    production_names: *std.StringHashMap(void),
+    production_calls: *std.StringHashMap(void),
+    test_names: *std.StringHashMap(void),
 ) !void {
     var state = ScanState{};
     const python = isPythonFile(ff.file);
+    const language: core.source_lexer.Language = if (python) .python else .javascript;
+    var test_indent: ?usize = null;
     var line_no: u32 = 0;
     var lines = std.mem.splitScalar(u8, ff.contents, '\n');
     while (lines.next()) |line| {
         line_no += 1;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (test_indent) |indent| {
+            if (trimmed.len != 0 and lineIndent(line) <= indent and !isTestBlockStart(trimmed)) {
+                test_indent = null;
+            }
+        }
+        if (test_indent == null and isTestBlockStart(trimmed)) {
+            test_indent = lineIndent(line);
+        }
+        const in_test = test_indent != null;
         if (isDeclarationLine(ff.funcs, line_no)) continue;
+
         var code = std.ArrayList(u8).empty;
         defer code.deinit(allocator);
-        normalizeLine(allocator, &code, line, python, &state) catch continue;
+        core.source_lexer.sanitizeLine(allocator, &code, line, language, .discard_literals, &state) catch continue;
         var index: usize = 0;
         while (index < code.items.len) {
             if (!isIdentChar(code.items[index])) {
@@ -495,16 +529,36 @@ fn collectSymbolReferences(
             const name = code.items[start..index];
             var lookahead = index;
             while (lookahead < code.items.len and std.ascii.isWhitespace(code.items[lookahead])) lookahead += 1;
-            if (lookahead < code.items.len and code.items[lookahead] == '(') continue;
-            if (names.contains(name)) continue;
-            const owned = try allocator.dupe(u8, name);
-            errdefer allocator.free(owned);
-            try names.put(owned, {});
+            const is_call = lookahead < code.items.len and code.items[lookahead] == '(';
+            if (is_call) {
+                try putReference(allocator, if (in_test) test_names else production_calls, name);
+            } else {
+                try putReference(allocator, if (in_test) test_names else production_names, name);
+            }
         }
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────
+fn putReference(allocator: Allocator, names: *std.StringHashMap(void), name: []const u8) !void {
+    if (names.contains(name)) return;
+    const owned = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned);
+    try names.put(owned, {});
+}
+
+fn isTestBlockStart(line: []const u8) bool {
+    if (std.mem.startsWith(u8, line, "test \"") or std.mem.startsWith(u8, line, "test{") or
+        std.mem.startsWith(u8, line, "test(") or std.mem.startsWith(u8, line, "it(") or
+        std.mem.startsWith(u8, line, "describe(") or std.mem.startsWith(u8, line, "def test_") or
+        std.mem.startsWith(u8, line, "func Test")) return true;
+    return false;
+}
+
+fn lineIndent(line: []const u8) usize {
+    var index: usize = 0;
+    while (index < line.len and (line[index] == ' ' or line[index] == '\t')) : (index += 1) {}
+    return index;
+}
 
 fn makeFunc(name: []const u8, start: u32, end: u32, is_public: bool) core.types.FuncInfo {
     return .{
@@ -816,6 +870,32 @@ test "declaration scanning is not capped" {
     const result = try analyze(arena.allocator(), &ff, &.{});
     try std.testing.expectEqual(@as(u32, 65), result.total_functions);
     try std.testing.expectEqual(@as(u32, 65), result.dead_functions);
+}
+
+test "test-only helpers are excluded from duplicate candidates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents =
+        \\fn helper() void {
+        \\    const value = 1 + 2;
+        \\}
+        \\fn other() void {
+        \\    const value = 1 + 2;
+        \\}
+        \\test "helper works" {
+        \\    helper();
+        \\}
+    ;
+    const funcs = [_]core.types.FuncInfo{
+        makeFunc("helper", 1, 3, false),
+        makeFunc("other", 4, 6, false),
+    };
+    const ff = [_]FileFuncs{
+        .{ .file = "src/lib.zig", .contents = contents, .funcs = &funcs },
+    };
+    const result = try analyze(arena.allocator(), &ff, &.{});
+    try std.testing.expectEqual(@as(u32, 0), result.duplicate_functions);
+    try std.testing.expectEqual(@as(u32, 1), result.dead_functions);
 }
 
 test "normalized bodies ignore comments but preserve string values" {
