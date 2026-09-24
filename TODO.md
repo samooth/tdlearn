@@ -255,7 +255,7 @@ Prioridades:
 
 ### [ ] CI-001 — Automatizar verificación y releases
 
-- [ ] Añadir workflow para `zig fmt --check`, `zig build`, `zig build test` y ReleaseSafe.
+- [x] Añadir workflow para `zig fmt --check`, `zig build`, `zig build test` y ReleaseSafe.
 - [ ] Ejecutar `tdlearn check .` y `tdlearn gate .` sobre un baseline estable.
 - [ ] Validar contra una versión estable soportada de Zig y la matriz de sistemas objetivo.
 - [ ] Publicar artefactos, checksums y tags de release de forma reproducible.

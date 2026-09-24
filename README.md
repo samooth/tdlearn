@@ -157,8 +157,14 @@ src/
 ## Testing
 
 ```bash
+zig fmt --check src build.zig
+zig build
 zig build test
+zig build -Doptimize=ReleaseSafe test
 ```
+
+CI ejecuta la misma matriz con Zig `0.16.0` en Linux, macOS y Windows.
+El workflow solo valida el repositorio; no publica releases ni modifica baselines.
 
 ## License
 
