@@ -44,6 +44,11 @@ const BodyRecord = struct {
     body: []const u8,
 };
 
+const DuplicateResult = struct {
+    flags: []bool,
+    count: u32,
+};
+
 const ScanState = struct {
     block_comment: bool = false,
     triple_quote: u8 = 0,
@@ -138,49 +143,10 @@ pub fn analyze(
         }
     }
 
-    var body_groups = std.AutoHashMap(u64, std.ArrayList(BodyRecord)).init(allocator);
-    defer {
-        var iter = body_groups.iterator();
-        while (iter.next()) |entry| {
-            for (entry.value_ptr.items) |body| allocator.free(body.body);
-            entry.value_ptr.deinit(allocator);
-        }
-        body_groups.deinit();
-    }
-
-    var duplicate_flags = try allocator.alloc(bool, records.items.len);
-    defer allocator.free(duplicate_flags);
-    @memset(duplicate_flags, false);
-
-    var record_start: usize = 0;
-    for (file_funcs) |ff| {
-        for (ff.funcs, 0..) |func, func_index| {
-            const record = record_start + func_index;
-            if (isTestPath(ff.file) or hasOverlappingFunction(ff.funcs, func_index)) continue;
-            const body = try normalizeBody(allocator, ff.contents, func, ff.file) orelse continue;
-            const hash = std.hash.Wyhash.hash(0, body);
-            const gop = try body_groups.getOrPut(hash);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
-            errdefer allocator.free(body);
-            try gop.value_ptr.append(allocator, .{ .id = record, .body = body });
-        }
-        record_start += ff.funcs.len;
-    }
-
-    var duplicate_count: u32 = 0;
-    var groups = body_groups.iterator();
-    while (groups.next()) |entry| {
-        const group = entry.value_ptr.items;
-        for (group, 0..) |body, index| {
-            for (group[0..index]) |previous| {
-                if (std.mem.eql(u8, previous.body, body.body)) {
-                    duplicate_flags[body.id] = true;
-                    duplicate_count += 1;
-                    break;
-                }
-            }
-        }
-    }
+    const duplicates = try collectDuplicateFlags(allocator, file_funcs, records.items);
+    defer allocator.free(duplicates.flags);
+    const duplicate_count = duplicates.count;
+    const duplicate_flags = duplicates.flags;
 
     const total = std.math.cast(u32, records.items.len) orelse return error.IntegerOverflow;
     var redundant: u32 = 0;
@@ -484,6 +450,57 @@ fn normalizeBody(allocator: Allocator, contents: []const u8, func: core.types.Fu
         return null;
     }
     return try normalized.toOwnedSlice(allocator);
+}
+
+fn collectDuplicateFlags(
+    allocator: Allocator,
+    file_funcs: []const FileFuncs,
+    records: []const FunctionRecord,
+) !DuplicateResult {
+    var body_groups = std.AutoHashMap(u64, std.ArrayList(BodyRecord)).init(allocator);
+    defer {
+        var iter = body_groups.iterator();
+        while (iter.next()) |entry| {
+            for (entry.value_ptr.items) |body| allocator.free(body.body);
+            entry.value_ptr.deinit(allocator);
+        }
+        body_groups.deinit();
+    }
+
+    const flags = try allocator.alloc(bool, records.len);
+    errdefer allocator.free(flags);
+    @memset(flags, false);
+
+    var record_start: usize = 0;
+    for (file_funcs) |ff| {
+        for (ff.funcs, 0..) |func, func_index| {
+            const record = record_start + func_index;
+            if (isTestPath(ff.file) or hasOverlappingFunction(ff.funcs, func_index)) continue;
+            const body = try normalizeBody(allocator, ff.contents, func, ff.file) orelse continue;
+            const hash = std.hash.Wyhash.hash(0, body);
+            const gop = try body_groups.getOrPut(hash);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            errdefer allocator.free(body);
+            try gop.value_ptr.append(allocator, .{ .id = record, .body = body });
+        }
+        record_start += ff.funcs.len;
+    }
+
+    var count: u32 = 0;
+    var groups = body_groups.iterator();
+    while (groups.next()) |entry| {
+        const group = entry.value_ptr.items;
+        for (group, 0..) |body, index| {
+            for (group[0..index]) |previous| {
+                if (std.mem.eql(u8, previous.body, body.body)) {
+                    flags[body.id] = true;
+                    count += 1;
+                    break;
+                }
+            }
+        }
+    }
+    return .{ .flags = flags, .count = count };
 }
 
 fn normalizeLine(
