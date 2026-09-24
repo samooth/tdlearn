@@ -226,6 +226,15 @@ const JsonError = struct {
     error_info: JsonErrorDetails,
 };
 
+const JsonHotspot = struct {
+    file: []const u8,
+    name: []const u8,
+    lines: u32,
+    cyclomatic: u32,
+    cognitive: u32,
+    score: u64,
+};
+
 const JsonScan = struct {
     schema_version: u32,
     tool_version: []const u8,
@@ -243,6 +252,8 @@ const JsonScan = struct {
     dead_functions: u32,
     duplicate_functions: u32,
     root_causes: JsonRootCauses,
+    depth_path: []const []const u8,
+    hotspots: []const JsonHotspot,
 };
 
 const JsonCheck = struct {
@@ -370,6 +381,8 @@ const Analysis = struct {
     file_paths: []const []const u8,
     max_file_lines: u32,
     max_fn_lines: u32,
+    depth_path: []const []const u8,
+    hotspots: []const JsonHotspot,
 };
 
 fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8) ![]const []const u8 {
@@ -469,6 +482,8 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         inherit_edges,
         file_funcs.items,
     );
+    const depth_path = try buildDepthPath(arena, file_paths, import_edges);
+    const hotspots = try collectHotspots(arena, file_funcs.items);
 
     return .{
         .report = report,
@@ -478,6 +493,8 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         .file_paths = file_paths,
         .max_file_lines = max_file_lines,
         .max_fn_lines = max_fn_lines,
+        .depth_path = depth_path,
+        .hotspots = hotspots,
     };
 }
 
@@ -489,6 +506,110 @@ fn findFileNode(files: []const core.types.FileNode, path: []const u8) ?*const co
         }
     }
     return null;
+}
+
+const max_hotspots = 10;
+
+fn hotspotScore(func: core.types.FuncInfo) u64 {
+    const cyclomatic = func.cyclomatic_complexity orelse 0;
+    const cognitive = func.cognitive_complexity orelse 0;
+    return @as(u64, cyclomatic) * 1_000_000 + @as(u64, cognitive) * 1_000 + func.line_count;
+}
+
+fn collectHotspots(
+    allocator: std.mem.Allocator,
+    file_funcs: []const metrics.dead_code.FileFuncs,
+) ![]const JsonHotspot {
+    var hotspots = std.ArrayList(JsonHotspot).empty;
+    errdefer hotspots.deinit(allocator);
+    for (file_funcs) |file| {
+        for (file.funcs) |func| {
+            const hotspot = JsonHotspot{
+                .file = file.file,
+                .name = func.name,
+                .lines = func.line_count,
+                .cyclomatic = func.cyclomatic_complexity orelse 0,
+                .cognitive = func.cognitive_complexity orelse 0,
+                .score = hotspotScore(func),
+            };
+            if (hotspots.items.len < max_hotspots) {
+                try hotspots.append(allocator, hotspot);
+            } else if (hotspot.score > hotspots.items[hotspots.items.len - 1].score) {
+                hotspots.items[hotspots.items.len - 1] = hotspot;
+            } else {
+                continue;
+            }
+            var index = hotspots.items.len - 1;
+            while (index > 0 and hotspots.items[index - 1].score < hotspots.items[index].score) : (index -= 1) {
+                const temporary = hotspots.items[index - 1];
+                hotspots.items[index - 1] = hotspots.items[index];
+                hotspots.items[index] = temporary;
+            }
+        }
+    }
+    return try hotspots.toOwnedSlice(allocator);
+}
+
+fn collectDepthEntries(
+    allocator: std.mem.Allocator,
+    file_paths: []const []const u8,
+    import_edges: []const core.types.ImportEdge,
+    entries: *std.ArrayList(usize),
+) !void {
+    for (file_paths, 0..) |path, index| {
+        if (core.path_utils.isEntryPointPath(path)) try entries.append(allocator, index);
+    }
+    if (entries.items.len != 0) return;
+    if (import_edges.len == 0) {
+        if (file_paths.len != 0) try entries.append(allocator, 0);
+        return;
+    }
+
+    var node_index = std.StringHashMap(usize).init(allocator);
+    defer node_index.deinit();
+    for (file_paths, 0..) |path, index| try node_index.put(path, index);
+    var incoming = try allocator.alloc(bool, file_paths.len);
+    defer allocator.free(incoming);
+    @memset(incoming, false);
+    for (import_edges) |edge| {
+        const target = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
+        incoming[target] = true;
+    }
+    for (incoming, 0..) |has_incoming, index| {
+        if (!has_incoming) try entries.append(allocator, index);
+    }
+    if (entries.items.len == 0 and file_paths.len != 0) try entries.append(allocator, 0);
+}
+
+fn buildDepthPath(
+    allocator: std.mem.Allocator,
+    file_paths: []const []const u8,
+    import_edges: []const core.types.ImportEdge,
+) ![]const []const u8 {
+    var entries = std.ArrayList(usize).empty;
+    defer entries.deinit(allocator);
+    try collectDepthEntries(allocator, file_paths, import_edges, &entries);
+
+    var node_index = std.StringHashMap(usize).init(allocator);
+    defer node_index.deinit();
+    for (file_paths, 0..) |path, index| try node_index.put(path, index);
+    var graph_edges = std.ArrayList(core.types.GraphEdge).empty;
+    defer graph_edges.deinit(allocator);
+    for (import_edges) |edge| {
+        const from = node_index.get(edge.from_file) orelse return error.InvalidGraphEdge;
+        const to = node_index.get(edge.to_file) orelse return error.InvalidGraphEdge;
+        try graph_edges.append(allocator, .{ .from = from, .to = to });
+    }
+    const longest = try metrics.depth.computeLongestPath(allocator, file_paths.len, entries.items, graph_edges.items);
+    defer if (longest.nodes.len != 0) allocator.free(longest.nodes);
+
+    var path = std.ArrayList([]const u8).empty;
+    errdefer path.deinit(allocator);
+    for (longest.nodes) |node| {
+        if (node >= file_paths.len) return error.InvalidGraphEdge;
+        try path.append(allocator, file_paths[node]);
+    }
+    return try path.toOwnedSlice(allocator);
 }
 
 fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
@@ -527,6 +648,8 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
                 .equality = scoreInt(report.root_cause_scores.equality),
                 .redundancy = scoreInt(report.root_cause_scores.redundancy),
             },
+            .depth_path = result.depth_path,
+            .hotspots = result.hotspots,
         };
         try printJsonStdout(io, arena.allocator(), payload);
         return;
@@ -568,6 +691,26 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
         report.root_cause_scores.redundancy,
         report.root_cause_raw.redundancy_ratio,
     });
+    if (result.depth_path.len != 0) {
+        std.debug.print("Longest path: ", .{});
+        for (result.depth_path, 0..) |node_path, index| {
+            if (index != 0) std.debug.print(" -> ", .{});
+            std.debug.print("{s}", .{node_path});
+        }
+        std.debug.print("\n", .{});
+    }
+    if (result.hotspots.len != 0) {
+        std.debug.print("Function hotspots:\n", .{});
+        for (result.hotspots) |hotspot| {
+            std.debug.print("  {s}:{s} lines={d} cyclomatic={d} cognitive={d}\n", .{
+                hotspot.file,
+                hotspot.name,
+                hotspot.lines,
+                hotspot.cyclomatic,
+                hotspot.cognitive,
+            });
+        }
+    }
 }
 
 const CheckExecution = struct {
@@ -928,6 +1071,48 @@ test "json error envelope has stable fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"ok\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"category\":\"configuration\"") != null);
+}
+
+test "hotspots are sorted by complexity score" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const funcs = [_]core.types.FuncInfo{
+        .{
+            .name = "low",
+            .start_line = 1,
+            .end_line = 2,
+            .line_count = 2,
+            .cyclomatic_complexity = 2,
+            .cognitive_complexity = 2,
+        },
+        .{
+            .name = "high",
+            .start_line = 1,
+            .end_line = 20,
+            .line_count = 20,
+            .cyclomatic_complexity = 20,
+            .cognitive_complexity = 30,
+        },
+    };
+    const files = [_]metrics.dead_code.FileFuncs{
+        .{ .file = "src/lib.zig", .contents = "", .funcs = &funcs },
+    };
+    const hotspots = try collectHotspots(arena.allocator(), &files);
+    try std.testing.expectEqual(@as(usize, 2), hotspots.len);
+    try std.testing.expectEqualStrings("high", hotspots[0].name);
+    try std.testing.expectEqualStrings("low", hotspots[1].name);
+}
+
+test "depth path maps solver nodes to source paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const paths = [_][]const u8{ "src/main.zig", "src/lib.zig", "src/util.zig" };
+    const edges = [_]core.types.ImportEdge{
+        .{ .from_file = "src/main.zig", .to_file = "src/lib.zig" },
+        .{ .from_file = "src/lib.zig", .to_file = "src/util.zig" },
+    };
+    const path = try buildDepthPath(arena.allocator(), &paths, &edges);
+    try std.testing.expectEqualSlices([]const u8, &paths, path);
 }
 
 test "json payloads expose root and units" {

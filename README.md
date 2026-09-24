@@ -123,13 +123,25 @@ All commands accept `--json` for machine-readable output on stdout:
     "depth": 8000,
     "equality": 5750,
     "redundancy": 9930
-  }
+  },
+  "depth_path": ["src/main.zig", "src/analysis/mod.zig"],
+  "hotspots": [
+    {
+      "file": "src/analysis/imports.zig",
+      "name": "extract",
+      "lines": 78,
+      "cyclomatic": 33,
+      "cognitive": 58,
+      "score": 33058078
+    }
+  ]
 }
 ```
 
-Errores JSON usan el mismo schema y un envelope `ok: false` con
-`error_info.code`, `category` y `message`. `gate` incluye las métricas
-`baseline` y `current`.
+`scan --json` incluye `depth_path` con la ruta de dependencia más larga y
+`hotspots` con las diez funciones de mayor complejidad. Errores JSON usan el
+mismo schema y un envelope `ok: false` con `error_info.code`, `category` y
+`message`. `gate` incluye las métricas `baseline` y `current`.
 
 ## Architecture
 

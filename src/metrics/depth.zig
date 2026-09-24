@@ -6,6 +6,7 @@ const DepthSolver = struct {
     adj: []std.ArrayList(usize),
     state: []u8,
     memo: []u32,
+    next: []usize,
 
     fn visit(self: *DepthSolver, node: usize) !u32 {
         if (self.state[node] == 2) return self.memo[node];
@@ -16,8 +17,9 @@ const DepthSolver = struct {
         for (self.adj[node].items) |neighbor| {
             if (self.state[neighbor] == 1) continue;
             const child_depth = try self.visit(neighbor);
-            if (child_depth < std.math.maxInt(u32)) {
-                longest = @max(longest, child_depth + 1);
+            if (child_depth < std.math.maxInt(u32) and child_depth + 1 > longest) {
+                longest = child_depth + 1;
+                self.next[node] = neighbor;
             }
         }
 
@@ -27,40 +29,21 @@ const DepthSolver = struct {
     }
 };
 
-/// Compute maximum dependency depth from entry points using longest-path DFS.
-///
-/// Depth is the longest simple path from any entry point to a leaf in the import graph.
-/// Entry points have depth 0. Files not reachable from entry points are ignored.
-/// Cycle edges do not add repeated nodes to a path.
-///
-/// Returns the maximum depth found.
-pub fn computeMaxDepth(
+pub const LongestPath = struct {
+    depth: u32,
+    nodes: []usize,
+};
+
+pub fn computeLongestPath(
     allocator: Allocator,
     node_count: usize,
     entry_points: []const usize,
     edges: []const core.types.GraphEdge,
-) !u32 {
-    if (node_count == 0 or entry_points.len == 0) return 0;
-    for (entry_points) |entry_point| {
-        if (entry_point >= node_count) return error.InvalidEntryPoint;
-    }
-    for (edges) |edge| {
-        if (edge.from >= node_count or edge.to >= node_count) return error.InvalidGraphEdge;
-    }
-
-    // Build forward adjacency list (from → to)
-    var adj = try std.ArrayList(std.ArrayList(usize)).initCapacity(allocator, node_count);
-    defer {
-        for (adj.items) |*list| list.deinit(allocator);
-        adj.deinit(allocator);
-    }
-    for (0..node_count) |_| {
-        try adj.append(allocator, std.ArrayList(usize).empty);
-    }
-
-    for (edges) |edge| {
-        try adj.items[edge.from].append(allocator, edge.to);
-    }
+) !LongestPath {
+    if (node_count == 0 or entry_points.len == 0) return .{ .depth = 0, .nodes = &.{} };
+    try validateGraph(node_count, entry_points, edges);
+    const adj = try buildAdjacency(allocator, node_count, edges);
+    defer deinitAdjacency(allocator, adj);
 
     const state = try allocator.alloc(u8, node_count);
     defer allocator.free(state);
@@ -68,19 +51,84 @@ pub fn computeMaxDepth(
     const memo = try allocator.alloc(u32, node_count);
     defer allocator.free(memo);
     @memset(memo, 0);
+    const next = try allocator.alloc(usize, node_count);
+    defer allocator.free(next);
+    @memset(next, std.math.maxInt(usize));
 
     var solver = DepthSolver{
-        .adj = adj.items,
+        .adj = adj,
         .state = state,
         .memo = memo,
+        .next = next,
     };
-
-    var max_depth: u32 = 0;
+    var best_depth: u32 = 0;
+    var best_entry = entry_points[0];
     for (entry_points) |entry_point| {
-        max_depth = @max(max_depth, try solver.visit(entry_point));
+        const candidate = try solver.visit(entry_point);
+        if (candidate > best_depth) {
+            best_depth = candidate;
+            best_entry = entry_point;
+        }
     }
 
-    return max_depth;
+    var path = std.ArrayList(usize).empty;
+    errdefer path.deinit(allocator);
+    var current = best_entry;
+    while (true) {
+        try path.append(allocator, current);
+        const following = solver.next[current];
+        if (following == std.math.maxInt(usize)) break;
+        current = following;
+    }
+    return .{ .depth = best_depth, .nodes = try path.toOwnedSlice(allocator) };
+}
+
+pub fn computeMaxDepth(
+    allocator: Allocator,
+    node_count: usize,
+    entry_points: []const usize,
+    edges: []const core.types.GraphEdge,
+) !u32 {
+    const result = try computeLongestPath(allocator, node_count, entry_points, edges);
+    if (result.nodes.len != 0) allocator.free(result.nodes);
+    return result.depth;
+}
+
+fn validateGraph(
+    node_count: usize,
+    entry_points: []const usize,
+    edges: []const core.types.GraphEdge,
+) !void {
+    for (entry_points) |entry_point| {
+        if (entry_point >= node_count) return error.InvalidEntryPoint;
+    }
+    for (edges) |edge| {
+        if (edge.from >= node_count or edge.to >= node_count) return error.InvalidGraphEdge;
+    }
+}
+
+fn buildAdjacency(
+    allocator: Allocator,
+    node_count: usize,
+    edges: []const core.types.GraphEdge,
+) ![]std.ArrayList(usize) {
+    var adjacency = try std.ArrayList(std.ArrayList(usize)).initCapacity(allocator, node_count);
+    errdefer {
+        for (adjacency.items) |*list| list.deinit(allocator);
+        adjacency.deinit(allocator);
+    }
+    for (0..node_count) |_| {
+        try adjacency.append(allocator, std.ArrayList(usize).empty);
+    }
+    for (edges) |edge| {
+        try adjacency.items[edge.from].append(allocator, edge.to);
+    }
+    return try adjacency.toOwnedSlice(allocator);
+}
+
+fn deinitAdjacency(allocator: Allocator, adjacency: []std.ArrayList(usize)) void {
+    for (adjacency) |*list| list.deinit(allocator);
+    allocator.free(adjacency);
 }
 
 /// Compute depth score: 1 / (1 + max_depth / 8).
@@ -115,6 +163,20 @@ test "linear chain" {
     };
     const d = try computeMaxDepth(std.testing.allocator, 4, &eps, &edges);
     try std.testing.expectEqual(@as(u32, 3), d);
+}
+
+test "longest path exposes dependency chain" {
+    const eps = [_]usize{0};
+    const edges = [_]core.types.GraphEdge{
+        .{ .from = 0, .to = 1 },
+        .{ .from = 1, .to = 2 },
+        .{ .from = 2, .to = 3 },
+        .{ .from = 0, .to = 3 },
+    };
+    const result = try computeLongestPath(std.testing.allocator, 4, &eps, &edges);
+    defer std.testing.allocator.free(result.nodes);
+    try std.testing.expectEqual(@as(u32, 3), result.depth);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, result.nodes);
 }
 
 test "longest path ignores shortcut distance" {
