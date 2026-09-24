@@ -1,5 +1,8 @@
 # tdlearn
 
+[![CI](https://github.com/samooth/tdlearning/actions/workflows/ci.yml/badge.svg)](https://github.com/samooth/tdlearning/actions/workflows/ci.yml)
+[![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
+
 A codebase structural quality sensor written in Zig.
 
 ## Overview
