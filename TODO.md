@@ -214,9 +214,9 @@ Prioridades:
 
 ### [ ] CORE-002 — Integrar configuración, ownership y errores tipados
 
-- Referencias: `src/core/settings.zig`, `src/core/rules.zig:123-185`.
+- Referencias: `src/core/settings.zig`, `src/core/rules.zig` (`parseRules`).
 - [x] Integrar `Settings` o retirar campos que no tienen efecto: `Settings` pasó de 244 a 88 líneas y `core/types.zig` de 280 a 179; los campos sin consumidor (y los módulos `snapshot.zig`/`heat.zig`) se eliminaron en lugar de quedar como código muerto.
-- [ ] Unificar límites, exclusiones y thresholds con el walker y el parser: hoy el walker salta archivos >512 KiB (`file_too_large`) y el pipeline salta contenidos >2 MiB (`parse_too_large`); los dos límites son intencionales pero aún no salen de una única constante.
+- [ ] Unificar límites, exclusiones y thresholds con el walker y el parser: hoy hay tres números escritos en dos archivos — `max_file_size_kb = 512` (walker), `max_parse_size_kb = 100` (pipeline) y el backstop duro de 2 MiB en `main.readFile`; los tres son intencionales, pero ninguno comparte constante y `readFile` no recibe el límite del pipeline.
 - [x] Añadir `deinit`/ownership explícito y `errdefer` para resultados parciales: el rewrite de `dead_code.zig` libera flags, índices y `local_calls` con `defer`/`errdefer`, y `readFile` libera el buffer con `errdefer`.
 - [x] Comprobar el estado del allocator y propagar errores de dominio con contexto: sin `catch return null` ni `catch continue` sobre rutas de error en `src/analysis` y `src/metrics`.
 - [x] Añadir tests con `FailingAllocator` y errores de cada API pública (`src/analysis/oom_test.zig`, `src/metrics/equality.zig`).
