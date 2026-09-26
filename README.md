@@ -4,6 +4,12 @@
 [![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+**Languages / Idiomas:** **English** (this file) · [Español](README.es.md)
+
+> Translation of `README.es.md`. The numbers are a snapshot of a real run; run
+> `tdlearn scan .` for the current values. If you fix something here, mirror it
+> there: the two documents are kept in parallel, and any divergence is a bug.
+
 A codebase structural quality sensor written in Zig.
 
 ## Overview
@@ -158,18 +164,18 @@ changes):
 ```
 $ tdlearn scan .
 Scanning ....
-Found 33 files, 13888 lines
+Found 33 files, 14160 lines
 
-Quality Signal: 7111/10000
+Quality Signal: 7116/10000
 Bottleneck: depth
 Import edges: 62, call edges: 44, inherit edges: 0
-Functions: 395 (dead: 0, duplicated: 5)
+Functions: 403 (dead: 0, duplicated: 5)
 
 Root Causes:
   Modularity:  0.650 (raw Q=0.474)
   Acyclicity:  1.000 (cycles=0)
   Depth:       0.500 (max=8)
-  Equality:    0.567 (gini=0.433)
+  Equality:    0.569 (gini=0.431)
   Redundancy:  0.987 (ratio=0.013)
 Longest path: src/main.zig -> src/analysis/mod.zig -> ... -> src/core/toml.zig
 Function hotspots:
@@ -321,21 +327,21 @@ self-consistent, and any other `schema_version` is rejected with
   "ok": true,
   "root": ".",
   "units": { "quality_signal": "0-10000", "line_counts": "lines", "edge_counts": "edges" },
-  "quality_signal": 7111,
+  "quality_signal": 7116,
   "bottleneck": "depth",
   "files": 33,
-  "lines": 13888,
+  "lines": 14160,
   "import_edges": 62,
   "call_edges": 44,
   "inherit_edges": 0,
-  "functions": 395,
+  "functions": 403,
   "dead_functions": 0,
   "duplicate_functions": 5,
   "root_causes": {
     "modularity": 6495,
     "acyclicity": 10000,
     "depth": 5000,
-    "equality": 5672,
+    "equality": 5694,
     "redundancy": 9872
   },
   "depth_path": [
@@ -463,6 +469,26 @@ Line endings are owned by `.gitattributes` (`* text=auto eol=lf`, with the
 binary types this project produces pinned to `-text`), so the checkout is
 byte-identical on all three platforms and `zig fmt --check` never sees a
 platform-dependent diff.
+
+## Documentation
+
+| Document | English | Español |
+| --- | --- | --- |
+| Project description, usage, rules, JSON | README.md (this file) | [README.es.md](README.es.md) |
+| Outstanding work list, with links to the code | [TODO.md](TODO.md) | [TODO.es.md](TODO.es.md) |
+| License | [LICENSE](LICENSE) | [LICENSE](LICENSE) (same file, not translated) |
+| The rules this repository applies to itself | [`.tdlearn/rules.toml`](.tdlearn/rules.toml) (comments in English) | — |
+| CI verification | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (comments in English) | — |
+
+This repository's rules for its own documentation:
+
+- User documentation (`.md`) exists in English and in Spanish, and the two files
+  are kept in parallel with the same information in both.
+- Code, code comments, and the comments in `rules.toml` and the CI workflow are
+  **in English**: it is the project's shared language, and duplicating them
+  inside the code would make it harder to maintain, not easier.
+- Every reference to a file or a section of this README is a relative link, so
+  the reader can navigate from the documentation to the implementation.
 
 ## License
 

@@ -1,331 +1,347 @@
 # TODO — tdlearn
 
-Estado actual: implementación parcial. El build y la suite principal ya pasan; todavía quedan bloqueadores de robustez, contratos y distribución.
-
-Última auditoría: 2026-09-26
-
-## Definición de terminado
-
-- [x] `zig build`, `zig build test` y `zig build -Doptimize=ReleaseSafe test` terminan con código 0.
-- [x] `zig fmt --check` termina con código 0.
-- [ ] `scan`, `check` y `gate` tienen contratos de argumentos, streams y códigos de salida estables.
-- [ ] Un path inexistente, un error de permisos o una configuración inválida producen un error explícito, nunca una calidad artificialmente perfecta.
-- [ ] El escaneo es determinista, distingue archivos fuente de archivos omitidos y reporta diagnósticos de I/O.
-- [ ] Las métricas tienen una semántica documentada y tests para ciclos, componentes desconectados, datos ausentes y falsos positivos.
-- [ ] Existen pruebas de integración del pipeline completo y de la CLI.
-- [ ] README, licencia, empaquetado, CI y releases reflejan el comportamiento real.
-
-Prioridades:
-
-- **P0**: bloquea compilar, ejecutar o evitar resultados incorrectos graves.
-- **P1**: necesario para que el análisis y los contratos públicos sean fiables.
-- **P2**: robustez, mantenibilidad, rendimiento y experiencia de distribución.
-
-## P0 — bloqueadores
-
-### [x] BUILD-001 — Restaurar la compilación de los módulos
-
-- Referencias: `src/analysis/manifests.zig`, `src/analysis/resolver.zig`, `build.zig` (`createModule`, `addTestStep`).
-- [x] Resolver el conflicto de propiedad de `src/core/toml.zig`; los módulos no deben importar el mismo archivo mediante rutas relativas cruzadas.
-- [x] Implementar `expandAlias` o eliminar la llamada incompleta.
-- [x] Corregir el formato del resolver.
-- [x] Mantener cambios locales existentes en `resolver.zig` y `manifests.zig` de forma explícita, sin descartarlos accidentalmente.
-- [x] Verificar que `zig build` y `zig build test` compilan todos los módulos.
-
-### [x] BUILD-002 — Completar la integración de manifests y aliases
-
-- Referencias: `src/analysis/manifests.zig` (`readPackageAliasesAtRoot`), `src/analysis/graph_builder.zig` (`buildImportEdgesAtRootWithContents`), `src/analysis/resolver.zig` (`initWithAliases`).
-- [x] Leer manifests una vez durante el análisis.
-- [x] Pasar los aliases a `Resolver.initWithAliases`.
-- [x] Resolver aliases de Cargo/workspaces y subpaths de paquetes npm.
-- [x] Conservar nombres npm con guiones y registrar aparte las normalizaciones de Rust.
-- [x] Resolver correctamente `@scope/package`, `main` e `index`.
-- [x] Añadir pruebas de aliases válidos, conflictos, roots fuera del scan y manifests malformados.
-
-### [ ] IO-001 — Hacer que los errores de filesystem no produzcan falsos éxitos
-
-- Referencias: `src/main.zig` (`validateRoot`, `readFile`, `readOptionalFile`), `src/analysis/walker.zig` (`Walker.walk`, `Walker.appendFileNode`).
-- [x] Validar que el path raíz existe, es un directorio y es legible antes de comenzar.
-- [x] Diferenciar `NotFound`, permisos, errores de lectura, archivos demasiado grandes, UTF-8 inválido y `OutOfMemory`: `readFile`/`readOptionalFile` (`src/main.zig`) y `readSmallFile` (`src/analysis/manifests.zig`) devuelven `error.FileNotFound` y el resto de errores tipados, nunca `null`.
-- [x] No convertir OOM o errores de lectura en “archivo ausente”: `Resolver.resolve` es `!?[]const u8` y `FunctionExtractor`/`ImportExtractor` propagan `error.OutOfMemory`; hay tests con `FailingAllocator` en `src/analysis/oom_test.zig` y `src/metrics/equality.zig`.
-- [ ] Definir una política explícita para escaneos parciales; incluir `--allow-partial` solo si es necesario.
-- [x] Reportar archivos escaneados, omitidos y fallidos con su motivo: `skipped_files` en el JSON y en el texto, con `file_too_large` (walker) y `parse_too_large` (contenido); un archivo ilegible aborta el escaneo con error tipado en vez de desaparecer del recuento.
-- [ ] Añadir pruebas de integración para paths inexistentes, no legibles y archivos corruptos.
-
-### [ ] CLI-001 — Hacer estricto el contrato de argumentos
-
-- Referencias: `src/main.zig` (`parseOptions`, `printUsage`).
-- [x] Rechazar comando ausente, flags desconocidos, flags repetidos y argumentos extra.
-- [x] Validar que `--save` solo sea válido para `gate` y que las combinaciones de flags sean coherentes.
-- [x] Soportar `--` y un único path posicional.
-- [x] Definir códigos de salida: éxito, violación/gate fallido y error de uso/configuración/I/O.
-- [x] Enviar help/version a stdout y errores a stderr.
-- [ ] Añadir una matriz de tests para cada comando, flag y combinación inválida.
-
-### [ ] CONFIG-001 — Hacer estricto y seguro el parser de reglas
-
-- Referencias: `src/core/toml.zig` (`parseValue`, `parse`), `src/core/rules.zig` (`parseRules`, `validateTomlSyntax`).
-- [ ] Reportar errores con línea y columna en vez de ignorar líneas o claves desconocidas.
-- [x] Rechazar claves duplicadas, valores vacíos, comillas sin cerrar, arrays y secciones malformadas.
-- [ ] Validar escapes no soportados y reportar línea/columna.
-- [x] Rechazar tipos incorrectos y enteros fuera de rango sin truncamientos.
-- [x] Validar scores finitos dentro de `[0, 1]`.
-- [x] Exigir los campos obligatorios de layers y boundaries.
-- [ ] Añadir tests de configs malformadas y garantizar que ninguna config inválida hace pasar `check`.
-
-## P1 — análisis y métricas fiables
-
-### [ ] ANALYSIS-001 — Separar archivos fuente de archivos recorrido
-
-- Referencias: `src/analysis/walker.zig` (`walk`, `walkDir`, `flattenFiles`), `src/analysis/lang_registry.zig`, `src/main.zig` (`filterSourcePaths`, `collectSourceNodes`).
-- [x] Definir el conjunto exacto de archivos que participa en cada métrica.
-- [x] No contar README, JSON, binarios o extensiones desconocidas como nodos estructurales por accidente.
-- [x] Definir el tratamiento de archivos vacíos, binarios, symlinks y archivos grandes.
-- [x] Hacer que graphs, `file_count`, líneas y Gini usen el mismo universo de datos.
-- [ ] Añadir fixtures end-to-end con archivos no fuente.
-
-### [x] ANALYSIS-002 — Corregir la extracción de funciones Python
-
-- Referencias: `src/analysis/functions.zig` (`detectDecl`, `findBodyEnd`).
-- [x] Calcular `start_line`, `end_line` y `line_count` mediante indentación y declaraciones siguientes.
-- [x] Detectar correctamente métodos y conservar su alcance.
-- [x] Evitar solapamientos entre funciones consecutivas y soporte para defs anidados, docstrings y funciones de una línea.
-- [x] Verificar que llamadas, duplicados y `max_fn_lines` reciben el cuerpo correcto.
-
-### [ ] ANALYSIS-003 — Completar extractores de imports
-
-- Referencias: `src/analysis/imports.zig`.
-- [x] Filtrar comentarios, strings y template literals antes de extraer dependencias.
-- [x] Soportar comillas simples/dobles, aliases y `import()`/`require()`.
-- [x] Soportar imports agrupados de Python y la forma multilínea común de JS.
-- [ ] Completar formas multilínea de Python/JS y bloques más complejos.
-- [x] Resolver correctamente imports relativos de Python, `self`/`super` de Rust y variantes de Rust/Go: `resolveDotRelative` (`.helpers`, `..pkg.mod`), `resolveRustRelative` (`self::`, `super::`) y `normalizeSeparators` (`crate::`, `a::b`) tienen tests positivos y negativos.
-- [x] No interpretar strings balanceados como imports fuera de un bloque válido.
-- [x] Añadir fixtures por lenguaje con casos positivos y negativos.
-
-### [ ] ANALYSIS-004 — Completar resolución de módulos multi-lenguaje
-
-- Referencias: `src/analysis/resolver.zig`, `src/analysis/graph_builder.zig`.
-- [x] Añadir extensiones soportadas por el registry, como `.mjs`, `.mts`, `.hpp`, `.cc`, `.cxx`, `.hxx`, `.m` y `.mm`.
-- [x] Resolver rutas relativas anidadas y `self::`/`super::`.
-- [x] Evitar que sufijos ambiguos se resuelvan al primer archivo según el orden del filesystem.
-- [x] Aumentar el buffer para paths largos y probar paths anidados.
-- [x] Probar Unicode y separadores nativos.
-- [ ] Probar traversal y normalización de rutas.
-- [x] Hacer el resultado independiente del orden de recorrido.
-- [x] Propagar `error.OutOfMemory` en vez de devolver “no resuelto” (`resolve` es `!?[]const u8`, con test en `src/analysis/oom_test.zig`).
-
-### [ ] ANALYSIS-005 — Completar funciones, clases y herencia
-
-- Referencias: `src/analysis/functions.zig`, `src/analysis/classes.zig`, `src/analysis/inherit_graph.zig`.
-- [ ] Soportar arrow functions, métodos, modificadores, genéricos, declaraciones multilínea y constructores C++ relevantes. Los modificadores, genéricos y namespaces C++ ya están cubiertos; faltan arrow functions y declaraciones multilínea.
-- [ ] Detectar `export default class`, interfaces/type aliases de TypeScript, traits/impl de Rust y embedding de Go. `export default class`, `traits`/`impl` de Rust y namespaces cualificados ya están cubiertos; faltan `interface`/`type` de TS y el embedding de structs Go.
-- [x] Resolver bases cualificadas, namespaces, headers C++ y ambigüedades entre paquetes: `leafName` reduce `ns::Base` a `Base` y hay tests de bases cualificadas, namespaces y plantillas.
-- [ ] Corregir el fallback de herencia para que se use solo cuando no exista base importada.
-- [x] Añadir tests de alcance, solapamientos y relaciones ambiguas.
-- [x] Contar llaves sobre código saneado con el lexer compartido, incluidas las cadenas multilínea de Zig (`\\`), para que una llave dentro de un literal no corte el cuerpo de una función.
-
-### [ ] GRAPH-001 — Hacer conservador el grafo de llamadas
-
-- Referencias: `src/analysis/call_graph.zig` (`buildCallEdgesWithLimit`, `scanLine`).
-- [ ] Resolver llamadas por símbolo, import, receiver y visibilidad; no solo por nombre global.
-- [ ] Manejar `obj.run()`, `obj->run()`, métodos, aliases y dispatch sin crear edges falsos.
-- [ ] Ignorar comentarios, strings y declaraciones inline correctamente.
-- [ ] Dejar las llamadas no resolubles como ambiguas, no como aristas inventadas.
-- [ ] Cubrir funciones privadas, nombres duplicados, comentarios y strings con tests negativos.
-
-### [x] METRIC-001 — Definir y corregir la profundidad
-
-- Referencias: `src/metrics/depth.zig`, `src/metrics/mod.zig` (`computeHealth`).
-- [x] Decidir si la métrica representa camino más largo o distancia mínima.
-- [x] Hacer explícita la política para ciclos, nodos inalcanzables y componentes desconectados.
-- [x] Eliminar el límite fijo de 32 entry points o documentarlo y probarlo.
-- [x] Añadir tests con rutas de distinta longitud, saltos, ciclos, raíces múltiples y archivos sin entry point.
-
-### [x] METRIC-002 — Alinear Equality con la complejidad declarada
-
-- Referencias: `src/analysis/functions.zig` (`computeComplexity`), `src/core/types.zig` (`FuncInfo`), `src/metrics/equality.zig` (`giniCoefficient`, `computeFunctionComplexityGini`).
-- [x] Implementar complejidad ciclomática/cognitiva o renombrar la métrica a igualdad de tamaño de archivo.
-- [x] Poblar los campos de complejidad o eliminar los que no se puedan calcular.
-- [x] Añadir tests que demuestren que branches, y no solo líneas, afectan al resultado cuando aplique.
-
-### [x] METRIC-003 — Corregir redundancia, dead code y duplicados
-
-- Referencias: `src/metrics/dead_code.zig` (`analyze`, `propagateReachability`, `collectDuplicateFlags`), `src/metrics/dead_code_test.zig`.
-- [x] Resolver llamadas por símbolo y alcanzar desde entry points/API pública.
-- [x] No clasificar como test cualquier ruta que contenga la cadena `test`.
-- [x] Eliminar el límite de declaraciones de 64 y validar exclusiones.
-- [x] Comparar cuerpos normalizados con verificación secundaria para evitar colisiones de hash.
-- [x] Manejar comentarios, strings, cuerpos grandes, funciones anidadas y solapamientos.
-- [x] No premiar la ausencia de datos como si fuera cero redundancia; definir una política para proyectos sin funciones.
-
-### [x] METRIC-004 — Validar ciclos y aristas de modularidad
-
-- Referencias: `src/metrics/acyclicity.zig`, `src/metrics/modularity.zig`, `src/metrics/mod.zig` (`computeHealth`).
-- [x] Decidir y probar si self-loops cuentan como ciclos.
-- [x] Definir si acyclicity usa imports o la unión de imports, llamadas y herencia.
-- [x] Rechazar o contabilizar aristas con endpoints desconocidos.
-- [x] Documentar la partición usada por Newman y comportamiento de multigraphs, duplicados y grafo vacío.
-- [x] Hacer las métricas deterministas y evitar sesgos por orden de archivos.
-
-## P1 — configuración, CLI y persistencia
-
-### [x] RULES-001 — Completar semántica de reglas y globs
-
-- Referencias: `src/core/rules.zig` (`globMatch`, `validatePattern`, `checkRules`).
-- [x] Validar nombres, paths, órdenes y solapamientos ambiguos entre layers.
-- [x] Implementar una gramática de glob documentada para `*`, `**` y separadores.
-- [x] Soportar escapes y definir el comportamiento Unicode/Windows.
-- [x] Separar paths absolutos de paths relativos al root.
-- [x] Deduplicar violaciones y hacer estable su orden.
-- [x] Añadir tests de patrones conflictivos, `**` y límites de segmentos.
-
-### [x] CORE-001 — Normalizar rutas y definir portabilidad
-
-- Referencias: `src/core/path_utils.zig` (`canonicalRelative`, `isPackageIndexPath`), `src/analysis/walker.zig` (`normalizePaths`), `src/analysis/resolver.zig` (`normalizeSeparators`).
-- [x] Usar basename/extensión correctos.
-- [x] Separar paths del filesystem de paths canónicos.
-- [x] Convertir a relativas las aristas y paths usados por rules.
-- [x] Definir symlinks, junctions, dotfiles, case sensitivity, UNC y paths con puntos.
-- [x] Implementar o corregir la convención de `mod.rs` y entry points.
-- [x] Añadir tests portables de Unicode, traversal y separadores; la ejecución multi-OS queda en TEST-001.
-
-### [x] JSON-001 — Versionar y estabilizar la salida JSON
-
-- Referencias: `src/main.zig` (`JsonScan`, `JsonCheck`, `JsonGate`, `makeJsonScan`, `printHumanScan`), `README.md` ("JSON Output").
-- [x] Añadir `schema_version` y versión de herramienta.
-- [x] Añadir root y unidades.
-- [x] Incluir archivos asociados, rule, severidad, `from` y `to` donde existan.
-- [x] Incluir métricas anterior/nueva donde existan.
-- [x] Definir un envelope único para errores de uso, configuración, I/O y baseline.
-- [x] Emitir JSON para `gate --save --json`.
-- [x] Emitir JSON para fallos de configuración.
-- [x] Añadir golden tests y asegurar que el JSON exitoso no escribe diagnósticos en stdout.
-
-### [ ] BASELINE-001 — Hacer robusto el baseline y su persistencia
-
-- Referencias: `src/core/baseline.zig` (`readBaseline`, `Baseline.validate`), `src/main.zig` (`saveGate`, `compareGate`).
-- [x] Añadir versión de schema y compatibilidad con el formato existente.
-- [x] Validar scores finitos dentro de `[0, 1]`.
-- [x] Validar contadores y tolerancias; definir la semántica de `total_functions`.
-- [x] Escribir mediante archivo temporal y renombrado atómico, sin truncar un baseline válido.
-- [x] Manejar baseline ausente, truncado, corrupto, de versión futura y escritura fallida.
-- [x] Actualizar `.tdlearn/baseline.json` solo después de estabilizar el análisis y sus tests.
-
-### [ ] CORE-002 — Integrar configuración, ownership y errores tipados
-
-- Referencias: `src/core/settings.zig`, `src/core/rules.zig` (`parseRules`).
-- [x] Integrar `Settings` o retirar campos que no tienen efecto: `Settings` pasó de 244 a 88 líneas y `core/types.zig` de 280 a 179; los campos sin consumidor (y los módulos `snapshot.zig`/`heat.zig`) se eliminaron en lugar de quedar como código muerto.
-- [ ] Unificar límites, exclusiones y thresholds con el walker y el parser: hoy hay tres números escritos en dos archivos — `max_file_size_kb = 512` (walker), `max_parse_size_kb = 100` (pipeline) y el backstop duro de 2 MiB en `main.readFile`; los tres son intencionales, pero ninguno comparte constante y `readFile` no recibe el límite del pipeline.
-- [x] Añadir `deinit`/ownership explícito y `errdefer` para resultados parciales: el rewrite de `dead_code.zig` libera flags, índices y `local_calls` con `defer`/`errdefer`, y `readFile` libera el buffer con `errdefer`.
-- [x] Comprobar el estado del allocator y propagar errores de dominio con contexto: sin `catch return null` ni `catch continue` sobre rutas de error en `src/analysis` y `src/metrics`.
-- [x] Añadir tests con `FailingAllocator` y errores de cada API pública (`src/analysis/oom_test.zig`, `src/metrics/equality.zig`).
-
-## P2 — pruebas, rendimiento y entrega
-
-### [ ] TEST-001 — Crear pruebas de integración end-to-end
-
-- Referencias: `build.zig` (`addTestStep`), `src/main.zig` (`parseOptions`, `runScan`, `runCheck`, `runGate`).
-- [x] Cubrir el pipeline `Walker → GraphBuilder → extractores → grafos → computeHealth`.
-- [x] Probar `scan`, `check`, `gate` y `gate --save` sobre proyectos temporales.
-- [ ] Cubrir stdout, stderr, JSON, códigos de salida, paths inválidos, archivos grandes, Unicode y symlinks.
-- [ ] Ejecutar Debug y ReleaseSafe en Linux, macOS y Windows.
-- [ ] Añadir benchmarks para repositorios grandes y verificar que no hay crecimiento cuadrático.
-
-### [x] TEST-002 — Completar la matriz de lenguajes
-
-- [x] Mantener fixtures para Zig, Rust, Python, JavaScript/TypeScript, Go y C/C++.
-- [x] Añadir casos de comentarios, strings, imports agrupados/multilínea, aliases, métodos, genéricos y macros.
-- [x] Ejecutar tests positivos y negativos para evitar edges, funciones o ciclos inventados.
-- [x] Documentar explícitamente cualquier constructo no soportado por el parser line-based.
-
-### [ ] PERF-001 — Eliminar límites y cuellos de botella
-
-- Referencias: `src/metrics/mod.zig` (`computeEquality`), `src/analysis/call_graph.zig` (`buildCallEdgesWithLimit`), `src/analysis/walker.zig` (`countLines`, `appendFileNode`).
-- [x] Indexar cada archivo una sola vez y evitar releerlo.
-- [x] Reemplazar deduplicación O(E²) por sets hash.
-- [ ] Eliminar límites arbitrarios de entry points, statements y tamaños, o hacerlos configurables y seguros.
-- [x] Proteger índices y conteos contra overflow y entradas inválidas.
-
-### [ ] CLEANUP-001 — Conectar o retirar APIs incompletas
-
-- Referencias: `src/metrics/mod.zig`, `src/metrics/dead_code.zig`, `src/core/settings.zig`, `src/core/types.zig`.
-- [x] Integrar `Snapshot`, `HeatTracker` y los módulos de métricas o retirar su API pública: `snapshot.zig`, `heat.zig` y `redundancy.zig` se eliminaron (no tenían consumidor y sus tests ni siquiera se ejecutaban); la redundancia la calcula `dead_code.analyze`.
-- [x] Eliminar helpers duplicados, estados muertos y cálculos de score no usados: sin huérfanos, verificado recorriendo `src/**/*.zig` contra los imports de cada módulo.
-- [ ] Documentar ownership, invariantes y seguridad de hilos de las APIs públicas.
-- [ ] Añadir smoke tests del paquete `tdlearn-core` instalado.
-
-### [ ] CLEANUP-002 — Poder actuar sobre los duplicados que se reportan
-
-- Referencias: `src/metrics/dead_code.zig:739-806` (`collectDuplicateFlags`), `src/main.zig` (salida de `scan`).
-- [ ] `scan` solo imprime `duplicated: 5`; no dice qué funciones son ni dónde están, así que el número no es accionable sin instrumentar el código.
-- [ ] Exponer los grupos duplicados (miembros, path, línea y tamaño del cuerpo) en la salida de texto y en el JSON, junto al conteo.
-- [ ] Mantener el JSON estable: es un campo aditivo, y `gate`/`check` no deben empezar a comparar la lista.
-
-### [ ] CI-001 — Automatizar verificación y releases
-
-- Referencias: `.github/workflows/ci.yml`, `build.zig` (`addRunCommand`).
-- [x] Añadir workflow para `zig fmt --check`, `zig build`, `zig build test` y ReleaseSafe.
-- [x] Ejecutar `tdlearn check .` y `tdlearn gate .` sobre un baseline estable.
-- [x] Incluir `build.zig.zon` en el `zig fmt --check` de CI y en la lista del README.
-- [x] Añadir `concurrency` por ref con `cancel-in-progress` para no acumular runs obsoletos.
-- [x] Limitar `push` a `main` e ignorar tags, con el coste evitado documentado inline en el workflow.
-- [x] Delegar los finales de línea a `.gitattributes` (`* text=auto eol=lf` más binarios fijados).
-- [ ] Validar contra una versión estable soportada de Zig y la matriz de sistemas objetivo.
-- [ ] Publicar artefactos, checksums y tags de release de forma reproducible.
-- [ ] Reactivar la ejecución en tags cuando exista un workflow de release; hoy un push de tag solo repite la matriz de 3 SO.
-
-### [ ] DOC-001 — Alinear documentación y empaquetado
-
-- Referencias: `README.md`, `build.zig.zon`, `LICENSE`, `.gitattributes`.
-- [x] Documentar instalación, `zig build run --`, rutas soportadas, límites y limitaciones del parser.
-- [x] Corregir el ejemplo JSON para que sea JSON válido.
-- [x] Añadir el archivo `LICENSE` declarado por el README.
-- [x] Declarar `README.md` y `LICENSE` en `paths` de `build.zig.zon`.
-- [ ] Derivar la versión de una única fuente (`tool_version` en `src/main.zig` y `.version` en `build.zig.zon` siguen duplicadas).
-- [x] Corregir `paths` que referencian directorios inexistentes.
-- [x] Documentar esquema de TOML, JSON y baseline, compatibilidad y política de migraciones.
-- [x] Documentar la escala de calidad: `0–1` en config y baseline, `0–10000` en salida, y por qué difieren.
-- [x] Documentar la escala del quality signal: media geométrica, suelo 0.01 y techo 3981/10000.
-- [x] Documentar los códigos de salida 0/1/2 y el envelope `error_info` de `--json`.
-- [x] Documentar qué compara `gate`, con qué tolerancia, y que `total_functions` no se compara.
-- [x] Refrescar el ejemplo de salida con números reales del repositorio, etiquetados como snapshot.
-
-### [ ] QA-001 — Cerrar los controles del propio proyecto
-
-- Referencias: `.tdlearn/rules.toml`, `.tdlearn/baseline.json`.
-- [x] Hacer que `tdlearn check .` pase sin desactivar límites relevantes.
-- [x] Resolver o justificar las violaciones actuales de tamaño de archivo/función.
-- [x] Verificar que `tdlearn gate .` falla solo por regresiones reales.
-- [x] Añadir `max_cycles = 0` para que una regresión de ciclos no quede tapada por una ganancia de calidad.
-- [x] Añadir `max_cyclomatic = 20` y `max_cognitive = 45` para que la cola de complejidad —la que mide `equality`— no pueda pudrirse en silencio (ver RULES-002).
-- [x] Regenerar `.tdlearn/baseline.json` una vez commitados los cambios que lo producían. `total_functions` no participa en el gate (`src/core/baseline.zig`, `Baseline.compare`).
-- [ ] Fijar las GitHub Actions por SHA, para que un tag upstream movido no cambie lo que ejecuta CI.
-
-### [x] QA-002 — Partir `src/core/rules.zig` y bajar `max_file_lines`
-
-- Referencias: `src/core/rules.zig` (1091 líneas), `src/core/rules_test.zig` (608), `src/main.zig` (1152), `src/main_test.zig` (383), `.tdlearn/rules.toml` (`max_file_lines = 1200`), `README.md` ("This repository's own rules").
-- [x] Documentar la excepción de `max_file_lines = 1400` en `rules.toml` y en el README, en vez de subir el límite en silencio.
-- [x] Sacar los 388 renglones de tests de `rules.zig` a `src/core/rules_test.zig`, que solo usa la API pública (`parseRules`, `checkRules`, `globMatch`): de paso demuestra que la superficie pública basta para configurar y verificar un proyecto. `rules.zig` baja a 1091.
-- [x] Sacar los tests del CLI a `src/main_test.zig` y enraizar el artefacto de test en ese archivo (`build.zig`, `addTestStep`), para que la dependencia sea de una sola dirección (tests → implementación) y ningún archivo mezcle implementación con tests.
-- [x] Bajar `max_file_lines` de 1400 a 1200 (el archivo mayor es `main.zig` con 1152) y quitar la excepción documentada: ya no aplica porque ningún archivo bajo `src/` lleva sus tests dentro.
-- Nota: al añadir `main_test.zig` al grafo, `max_depth` pasó de 7 a 8 y la señal bajó ~100 puntos. Es el comportamiento correcto del depth (la cadena de imports más larga ahora incluye un archivo de test); ver METRIC-005.
-
-### [x] RULES-002 — Techos de complejidad por función
-
-- Referencias: `src/core/rules.zig` (`Constraints.max_cyclomatic`/`max_cognitive`, `checkComplexityCeiling`, `ComplexityKind`), `src/main.zig` (`Analysis.functions`, `JsonViolation`), `src/core/types.zig` (`FileFuncs.lang`), `.tdlearn/rules.toml`.
-- [x] Añadir `max_cyclomatic` y `max_cognitive` al esquema, con validación (entero, sin negativos, sin desbordamiento) y rechazo de claves desconocidas.
-- [x] Reportar **cada** función que excede el techo, con archivo, línea, nombre y valor medido, ordenadas por archivo y línea; a diferencia de `max_fn_lines`, que solo da el mayor.
-- [x] Exponer `subject` y `line` en la violación (JSON y texto) para que un consumidor pueda agrupar o anotar sin parsear el mensaje, y arreglar `from`, que antes salía `null` en violaciones de un solo archivo.
-- [x] Contar reglas, no hallazgos: `rules_checked` sube 1 por techo configurado, no por violación.
-- [x] Corregir la deduplicación: comparaba solo regla y archivos, lo que habría colapsado dos funciones distintas del mismo archivo; ahora compara también mensaje y sujeto.
-- [x] Validar las rutas de las funciones con la misma `validateInputPath` que el resto de entradas (lo encontró un test).
-- [x] Refactorizar las 11 funciones que el techo nuevo señalaba, sin subirlas: `call_graph.appendResolvedEdges` (cognitivo 81), `toml.parseValue` (31), `source_lexer.sanitizeLine` (26), `inherit_graph.appendResolvedEdges` (52), `rules.checkConstraintRules`, `dead_code.markLocalTargets`, `functions.detectCFn`, `functions.countParameters`, `rules.validatePattern`, `rules.validateTomlSyntax`.
-- Costecolateral útil: al refactorizar `call_graph.scanLine` se corrigió un bug real — no ignoraba comentarios, así que toda llamada dentro de un `//` o `/* */` contaba como arista — y se pasó al lexer compartido.
-
-### [ ] METRIC-005 — Decidir si los archivos de test pertenecen al grafo de imports
-
-- Referencias: `src/metrics/depth.zig`, `src/metrics/modularity.zig`, `src/metrics/dead_code.zig` (`isTestPath`).
-- [ ] `depth` y `modularity` cuentan los archivos de test como nodos y sus aristas como dependencias, pero `dead_code` ya los excluye de la producción. Hoy `main_test.zig` aparece en `depth_path` y eso sube `max_depth` de 7 a 8 solo por existir.
-- [ ] Decidir una sola política: o los tests no entran en el grafo estructural (y se documenta), o entran y se acepta que un árbol con muchos tests tiene un depth artificialmente alto.
-- [ ] Si se eligen, el cambio es en `filterSourcePaths`/`computeHealth` y debe ir acompañado de una nota en el README, porque cambia los números de todos los usuarios.
+**Languages / Idiomas:** **English** (this file) · [Español](TODO.es.md)
+
+> Translation of `TODO.es.md`. The two files are kept in parallel: if you close
+> or open an item, update both, or the list stops being useful as project state.
+
+Current state: partial implementation. The build and the main suite already
+pass; robustness, contracts and distribution work remain.
+
+Last audit: 2026-09-26
+
+The project's reference document is [README.md](README.md) (or
+[README.es.md](README.es.md) in Spanish). Every "References:" line below links to
+the source file it talks about, and the rules this repository applies to itself
+live in [`.tdlearn/rules.toml`](.tdlearn/rules.toml).
+
+## Definition of done
+
+- [x] `zig build`, `zig build test` and `zig build -Doptimize=ReleaseSafe test` exit with code 0.
+- [x] `zig fmt --check` exits with code 0.
+- [ ] `scan`, `check` and `gate` have stable argument, stream and exit-code contracts.
+- [ ] A non-existent path, a permission error or an invalid configuration produce an explicit error, never an artificially perfect score.
+- [ ] The scan is deterministic, distinguishes source files from skipped ones and reports I/O diagnostics.
+- [ ] The metrics have a documented semantics and tests for cycles, disconnected components, missing data and false positives.
+- [ ] There are integration tests for the whole pipeline and for the CLI.
+- [x] README, license, packaging and CI reflect real behaviour, in English and in Spanish.
+- [ ] Releases are published reproducibly (see [CI-001](#p2--tests-performance-and-delivery)).
+
+Priorities:
+
+- **P0**: blocks compiling, running, or avoiding seriously wrong results.
+- **P1**: needed for the analysis and the public contracts to be reliable.
+- **P2**: robustness, maintainability, performance and distribution.
+
+## P0 — blockers
+
+### [x] BUILD-001 — Restore compilation of the modules
+
+- References: [src/analysis/manifests.zig](src/analysis/manifests.zig), [src/analysis/resolver.zig](src/analysis/resolver.zig), [build.zig](build.zig) (`createModule`, `addTestStep`).
+- [x] Resolve the ownership conflict in `src/core/toml.zig`; modules must not import the same file through cross relative paths.
+- [x] Implement `expandAlias` or remove the incomplete call.
+- [x] Fix the resolver formatting.
+- [x] Keep the pre-existing local changes in `resolver.zig` and `manifests.zig` explicitly, without discarding them by accident.
+- [x] Verify that `zig build` and `zig build test` compile every module.
+
+### [x] BUILD-002 — Complete the integration of manifests and aliases
+
+- References: [src/analysis/manifests.zig](src/analysis/manifests.zig) (`readPackageAliasesAtRoot`), [src/analysis/graph_builder.zig](src/analysis/graph_builder.zig) (`buildImportEdgesAtRootWithContents`), [src/analysis/resolver.zig](src/analysis/resolver.zig) (`initWithAliases`).
+- [x] Read manifests once during the analysis.
+- [x] Pass the aliases to `Resolver.initWithAliases`.
+- [x] Resolve Cargo/workspace aliases and npm package subpaths.
+- [x] Keep hyphenated npm names and record Rust normalizations separately.
+- [x] Resolve `@scope/package`, `main` and `index` correctly.
+- [x] Add tests for valid aliases, conflicts, roots outside the scan and malformed manifests.
+
+### [ ] IO-001 — Make filesystem errors stop producing false successes
+
+- References: [src/main.zig](src/main.zig) (`validateRoot`, `readFile`, `readOptionalFile`), [src/analysis/walker.zig](src/analysis/walker.zig) (`Walker.walk`, `Walker.appendFileNode`).
+- [x] Validate that the root path exists, is a directory and is readable before starting.
+- [x] Distinguish `NotFound`, permissions, read errors, oversized files, invalid UTF-8 and `OutOfMemory`: `readFile`/`readOptionalFile` (in `src/main.zig`) and `readSmallFile` (in [src/analysis/manifests.zig](src/analysis/manifests.zig)) return `error.FileNotFound` and the other typed errors, never `null`.
+- [x] Stop turning OOM or read errors into "file absent": `Resolver.resolve` is `!?[]const u8` and `FunctionExtractor`/`ImportExtractor` propagate `error.OutOfMemory`; there are `FailingAllocator` tests in [src/analysis/oom_test.zig](src/analysis/oom_test.zig) and [src/metrics/equality.zig](src/metrics/equality.zig).
+- [ ] Define an explicit policy for partial scans; add `--allow-partial` only if it turns out to be necessary.
+- [x] Report scanned, skipped and failed files with their reason: `skipped_files` in the JSON and in the text output, with `file_too_large` (walker) and `parse_too_large` (content); an unreadable file aborts the scan with a typed error instead of disappearing from the count.
+- [ ] Add integration tests for non-existent, unreadable and corrupt paths.
+
+### [ ] CLI-001 — Make the argument contract strict
+
+- References: [src/main.zig](src/main.zig) (`parseOptions`, `printUsage`).
+- [x] Reject a missing command, unknown flags, repeated flags and extra arguments.
+- [x] Validate that `--save` is only valid for `gate` and that flag combinations are coherent.
+- [x] Support `--` and a single positional path.
+- [x] Define exit codes: success, violation/gate failure, and usage/configuration/I/O error.
+- [x] Send help/version to stdout and errors to stderr.
+- [ ] Add a test matrix for every command, flag and invalid combination.
+
+### [ ] CONFIG-001 — Make the rules parser strict and safe
+
+- References: [src/core/toml.zig](src/core/toml.zig) (`parseValue`, `parse`), [src/core/rules.zig](src/core/rules.zig) (`parseRules`, `validateTomlSyntax`).
+- [ ] Report errors with line and column instead of ignoring lines or unknown keys.
+- [x] Reject duplicate keys, empty values, unclosed quotes, arrays and malformed sections.
+- [ ] Validate unsupported escapes and report line/column.
+- [x] Reject wrong types and out-of-range integers without truncation.
+- [x] Validate finite scores within `[0, 1]`.
+- [x] Require the mandatory fields of layers and boundaries.
+- [ ] Add tests for malformed configurations and guarantee that no invalid configuration makes `check` pass.
+
+## P1 — reliable analysis and metrics
+
+### [ ] ANALYSIS-001 — Separate source files from walked files
+
+- References: [src/analysis/walker.zig](src/analysis/walker.zig) (`walk`, `walkDir`, `flattenFiles`), [src/analysis/lang_registry.zig](src/analysis/lang_registry.zig), [src/main.zig](src/main.zig) (`filterSourcePaths`, `collectSourceNodes`).
+- [x] Define the exact set of files that takes part in each metric.
+- [x] Stop counting README, JSON, binaries or unknown extensions as structural nodes by accident.
+- [x] Define the treatment of empty files, binaries, symlinks and large files.
+- [x] Make graphs, `file_count`, lines and Gini use the same data universe.
+- [ ] Add end-to-end fixtures with non-source files.
+
+### [x] ANALYSIS-002 — Fix Python function extraction
+
+- References: [src/analysis/functions.zig](src/analysis/functions.zig) (`detectDecl`, `findBodyEnd`).
+- [x] Compute `start_line`, `end_line` and `line_count` through indentation and the following declarations.
+- [x] Detect methods correctly and keep their scope.
+- [x] Avoid overlaps between consecutive functions and support nested defs, docstrings and one-line functions.
+- [x] Verify that calls, duplicates and `max_fn_lines` receive the right body.
+
+### [ ] ANALYSIS-003 — Complete the import extractors
+
+- References: [src/analysis/imports.zig](src/analysis/imports.zig).
+- [x] Filter comments, strings and template literals before extracting dependencies.
+- [x] Support single/double quotes, aliases and `import()`/`require()`.
+- [x] Support grouped Python imports and the common multiline JS form.
+- [ ] Complete the multiline forms of Python/JS and more complex blocks.
+- [x] Resolve Python relative imports, Rust `self`/`super` and Rust/Go variants correctly: `resolveDotRelative` (`.helpers`, `..pkg.mod`), `resolveRustRelative` (`self::`, `super::`) and `normalizeSeparators` (`crate::`, `a::b`) have positive and negative tests.
+- [x] Do not read balanced strings as imports outside a valid block.
+- [x] Add per-language fixtures with positive and negative cases.
+
+### [ ] ANALYSIS-004 — Complete multi-language module resolution
+
+- References: [src/analysis/resolver.zig](src/analysis/resolver.zig), [src/analysis/graph_builder.zig](src/analysis/graph_builder.zig).
+- [x] Add the extensions the registry supports, such as `.mjs`, `.mts`, `.hpp`, `.cc`, `.cxx`, `.hxx`, `.m` and `.mm`.
+- [x] Resolve nested relative paths and `self::`/`super::`.
+- [x] Stop ambiguous suffixes from resolving to whichever file the filesystem returned first.
+- [x] Raise the buffer for long paths and test nested paths.
+- [x] Test Unicode and native separators.
+- [ ] Test path traversal and normalization.
+- [x] Make the result independent of traversal order.
+- [x] Propagate `error.OutOfMemory` instead of reporting "unresolved" (`resolve` is `!?[]const u8`, with a test in [src/analysis/oom_test.zig](src/analysis/oom_test.zig)).
+
+### [ ] ANALYSIS-005 — Complete functions, classes and inheritance
+
+- References: [src/analysis/functions.zig](src/analysis/functions.zig), [src/analysis/classes.zig](src/analysis/classes.zig), [src/analysis/inherit_graph.zig](src/analysis/inherit_graph.zig).
+- [ ] Support arrow functions, methods, modifiers, generics, multiline declarations and the relevant C++ constructors. Modifiers, generics and C++ namespaces are already covered; arrow functions and multiline declarations are missing.
+- [ ] Detect `export default class`, TypeScript interfaces/type aliases, Rust traits/impls and Go embedding. `export default class`, Rust `traits`/`impl` and qualified namespaces are already covered; TS `interface`/`type` and Go struct embedding are missing.
+- [x] Resolve qualified bases, namespaces, C++ headers and ambiguities between packages: `leafName` reduces `ns::Base` to `Base`, with tests for qualified bases, namespaces and templates.
+- [ ] Fix the inheritance fallback so it is only used when there is no imported base.
+- [x] Add tests for scope, overlaps and ambiguous relations.
+- [x] Count braces over lexer-sanitized code, including Zig multiline (`\\`) strings, so a brace inside a literal never truncates a function body.
+
+### [ ] GRAPH-001 — Make the call graph conservative
+
+- References: [src/analysis/call_graph.zig](src/analysis/call_graph.zig) (`buildCallEdgesWithLimit`, `scanLine`).
+- [x] Ignore comments, strings and inline declarations correctly (the scanner used to count every call inside a `//` or `/* */` comment).
+- [ ] Resolve calls by symbol, import, receiver and visibility; not only by global name.
+- [ ] Handle `obj.run()`, `obj->run()`, methods, aliases and dispatch without inventing edges.
+- [ ] Leave unresolvable calls as ambiguous rather than as invented edges.
+- [ ] Cover private functions, duplicate names, comments and strings with negative tests.
+
+### [x] METRIC-001 — Define and fix depth
+
+- References: [src/metrics/depth.zig](src/metrics/depth.zig), [src/metrics/mod.zig](src/metrics/mod.zig) (`computeHealth`).
+- [x] Decide whether the metric means longest path or shortest distance.
+- [x] Make the policy for cycles, unreachable nodes and disconnected components explicit.
+- [x] Remove the fixed 32-entry-point limit or document and test it.
+- [x] Add tests with paths of different length, jumps, cycles, multiple roots and files with no entry point.
+
+### [x] METRIC-002 — Align equality with declared complexity
+
+- References: [src/analysis/functions.zig](src/analysis/functions.zig) (`computeComplexity`), [src/core/types.zig](src/core/types.zig) (`FuncInfo`), [src/metrics/equality.zig](src/metrics/equality.zig) (`giniCoefficient`, `computeFunctionComplexityGini`).
+- [x] Implement cyclomatic/cognitive complexity or rename the metric to file-size equality.
+- [x] Populate the complexity fields or delete the ones that cannot be computed.
+- [x] Add tests showing that branches, and not only lines, affect the result where applicable.
+
+### [x] METRIC-003 — Fix redundancy, dead code and duplicates
+
+- References: [src/metrics/dead_code.zig](src/metrics/dead_code.zig) (`analyze`, `propagateReachability`, `collectDuplicateFlags`), [src/metrics/dead_code_test.zig](src/metrics/dead_code_test.zig).
+- [x] Resolve calls by symbol and reach from entry points/public API.
+- [x] Stop treating any path containing the string `test` as a test.
+- [x] Remove the 64-declaration limit and validate the exclusions.
+- [x] Compare normalized bodies with a secondary check to avoid hash collisions.
+- [x] Handle comments, strings, large bodies, nested functions and overlaps.
+- [x] Stop rewarding missing data as if it were zero redundancy; define a policy for projects with no functions.
+
+### [x] METRIC-004 — Validate cycles and modularity edges
+
+- References: [src/metrics/acyclicity.zig](src/metrics/acyclicity.zig), [src/metrics/modularity.zig](src/metrics/modularity.zig), [src/metrics/mod.zig](src/metrics/mod.zig) (`computeHealth`).
+- [x] Decide and test whether self-loops count as cycles.
+- [x] Define whether acyclicity uses imports or the union of import, call and inherit edges.
+- [x] Reject or account for edges with unknown endpoints.
+- [x] Document the partition used by Newman and the behaviour of multigraphs, duplicates and the empty graph.
+- [x] Make the metrics deterministic and free of file-order bias.
+
+### [ ] METRIC-005 — Decide whether test files belong to the import graph
+
+- References: [src/metrics/depth.zig](src/metrics/depth.zig), [src/metrics/modularity.zig](src/metrics/modularity.zig), [src/metrics/dead_code.zig](src/metrics/dead_code.zig) (`isTestPath`).
+- [ ] `depth` and `modularity` count test files as nodes and their edges as dependencies, but `dead_code` already excludes them from production. Today `main_test.zig` appears in `depth_path`, which raises `max_depth` from 7 to 8 purely because it exists.
+- [ ] Decide on a single policy: either test files do not enter the structural graph (and it is documented), or they do and an artificially high depth is accepted for a tree with many tests.
+- [ ] If one is chosen, the change is in `filterSourcePaths`/`computeHealth` and must be accompanied by a note in the README, because it changes the numbers for every user.
+
+## P1 — configuration, CLI and persistence
+
+### [x] RULES-001 — Complete rule and glob semantics
+
+- References: [src/core/rules.zig](src/core/rules.zig) (`globMatch`, `validatePattern`, `checkRules`), tests in [src/core/rules_test.zig](src/core/rules_test.zig).
+- [x] Validate names, paths, orders and ambiguous overlaps between layers.
+- [x] Implement a documented glob grammar for `*`, `**` and separators.
+- [x] Support escapes and define Unicode/Windows behaviour.
+- [x] Separate absolute paths from paths relative to the root.
+- [x] Deduplicate violations and make their order stable.
+- [x] Add tests for conflicting patterns, `**` and segment boundaries.
+
+### [x] RULES-002 — Per-function complexity ceilings
+
+- References: [src/core/rules.zig](src/core/rules.zig) (`Constraints.max_cyclomatic`/`max_cognitive`, `checkComplexityCeiling`, `ComplexityKind`), [src/main.zig](src/main.zig) (`Analysis.functions`, `JsonViolation`), [src/core/types.zig](src/core/types.zig) (`FileFuncs.lang`), [`.tdlearn/rules.toml`](.tdlearn/rules.toml).
+- [x] Add `max_cyclomatic` and `max_cognitive` to the schema, with validation (integer, non-negative, no overflow) and rejection of unknown keys.
+- [x] Report **every** function over the line, with file, line, name and measured value, ordered by file and then by line; unlike `max_fn_lines`, which only reports the largest.
+- [x] Expose `subject` and `line` on the violation (JSON and text) so a consumer can group or annotate without parsing the message, and fix `from`, which used to be `null` for single-file violations.
+- [x] Count rules, not findings: `rules_checked` goes up by one per configured ceiling, not per violation.
+- [x] Fix the deduplication: it compared only rule and files, which would have collapsed two different functions of the same file; it now compares the message and the subject too.
+- [x] Validate function paths with the same `validateInputPath` as every other input (a test found that hole).
+- [x] Refactor the eleven functions the new ceilings flagged, instead of raising them: `call_graph.appendResolvedEdges` (cognitive 81), `toml.parseValue` (31), `source_lexer.sanitizeLine` (26), `inherit_graph.appendResolvedEdges` (52), `rules.checkConstraintRules`, `dead_code.markLocalTargets`, `functions.detectCFn`, `functions.countParameters`, `rules.validatePattern`, `rules.validateTomlSyntax`.
+- [x] Verify both ceilings fail a real `check` (exit 1) with a deliberately complex function.
+- Useful side effect: refactoring `call_graph.scanLine` fixed a real bug — it ignored comments, so every call inside a `//` or `/* */` became an edge — and moved it onto the shared lexer.
+
+### [x] CORE-001 — Normalize paths and define portability
+
+- References: [src/core/path_utils.zig](src/core/path_utils.zig) (`canonicalRelative`, `isPackageIndexPath`), [src/analysis/walker.zig](src/analysis/walker.zig) (`normalizePaths`), [src/analysis/resolver.zig](src/analysis/resolver.zig) (`normalizeSeparators`).
+- [x] Use the correct basename/extension.
+- [x] Separate filesystem paths from canonical paths.
+- [x] Make edges and rule paths relative.
+- [x] Define symlinks, junctions, dotfiles, case sensitivity, UNC and dotted paths.
+- [x] Implement or fix the `mod.rs` and entry-point conventions.
+- [x] Add portable tests for Unicode, traversal and separators; the multi-OS run is in TEST-001.
+
+### [x] JSON-001 — Version and stabilize the JSON output
+
+- References: [src/main.zig](src/main.zig) (`JsonScan`, `JsonCheck`, `JsonGate`, `makeJsonScan`, `printHumanScan`), README ("JSON Output"), tests in [src/main_test.zig](src/main_test.zig).
+- [x] Add `schema_version` and a tool version.
+- [x] Add root and units.
+- [x] Include the associated file, rule, severity, `from` and `to` where they exist.
+- [x] Include previous/new metrics where they exist.
+- [x] Define a single envelope for usage, configuration, I/O and baseline errors.
+- [x] Emit JSON for `gate --save --json`.
+- [x] Emit JSON for configuration failures.
+- [x] Add golden tests and ensure a successful JSON run writes no diagnostics to stdout.
+
+### [ ] BASELINE-001 — Make the baseline and its persistence robust
+
+- References: [src/core/baseline.zig](src/core/baseline.zig) (`readBaseline`, `Baseline.validate`), [src/main.zig](src/main.zig) (`saveGate`, `compareGate`).
+- [x] Add a schema version and compatibility with the existing format.
+- [x] Validate finite scores within `[0, 1]`.
+- [x] Validate counters and tolerances; define the semantics of `total_functions`.
+- [x] Write through a temporary file and an atomic rename, without truncating a valid baseline.
+- [x] Handle an absent, truncated, corrupt or future-version baseline and a failed write.
+- [x] Update `.tdlearn/baseline.json` only after the analysis and its tests are stable.
+
+### [ ] CORE-002 — Integrate configuration, ownership and typed errors
+
+- References: [src/core/settings.zig](src/core/settings.zig), [src/core/rules.zig](src/core/rules.zig) (`parseRules`).
+- [x] Integrate `Settings` or retire the fields that have no effect: `Settings` went from 244 to 88 lines and `core/types.zig` from 280 to 179; the fields with no consumer (and the `snapshot.zig`/`heat.zig` modules) were deleted instead of being left as dead code.
+- [ ] Unify the size limits, exclusions and thresholds across the walker and the parser: there are three numbers written in two files — `max_file_size_kb = 512` (walker), `max_parse_size_kb = 100` (pipeline) and the 2 MiB hard backstop in `main.readFile`; all three are intentional, but none shares a constant and `readFile` does not receive the pipeline's limit.
+- [x] Add explicit `deinit`/ownership and `errdefer` for partial results: the `dead_code.zig` rewrite frees flags, indices and `local_calls` with `defer`/`errdefer`, and `readFile` frees its buffer with `errdefer`.
+- [x] Check the allocator state and propagate domain errors with context: no `catch return null` or `catch continue` left on error paths in `src/analysis` and `src/metrics`.
+- [x] Add tests with `FailingAllocator` and the errors of each public API ([src/analysis/oom_test.zig](src/analysis/oom_test.zig), [src/metrics/equality.zig](src/metrics/equality.zig)).
+
+## P2 — tests, performance and delivery
+
+### [ ] TEST-001 — Create end-to-end integration tests
+
+- References: [build.zig](build.zig) (`addTestStep`), [src/main_test.zig](src/main_test.zig) (`parseOptions`, `runScan`, `runCheck`, `runGate`).
+- [x] Cover the `Walker → GraphBuilder → extractors → graphs → computeHealth` pipeline.
+- [x] Test `scan`, `check`, `gate` and `gate --save` on temporary projects.
+- [ ] Cover stdout, stderr, JSON, exit codes, invalid paths, large files, Unicode and symlinks.
+- [ ] Run Debug and ReleaseSafe on Linux, macOS and Windows.
+- [ ] Add benchmarks for large repositories and verify there is no quadratic growth.
+
+### [x] TEST-002 — Complete the language matrix
+
+- References: [src/analysis/functions.zig](src/analysis/functions.zig), [src/analysis/classes.zig](src/analysis/classes.zig), [src/analysis/imports.zig](src/analysis/imports.zig).
+- [x] Keep fixtures for Zig, Rust, Python, JavaScript/TypeScript, Go and C/C++.
+- [x] Add cases for comments, strings, grouped/multiline imports, aliases, methods, generics and macros.
+- [x] Run positive and negative tests to avoid invented edges, functions or cycles.
+- [x] Explicitly document any construct the line-based parser does not support.
+
+### [ ] PERF-001 — Remove limits and bottlenecks
+
+- References: [src/metrics/mod.zig](src/metrics/mod.zig) (`computeEquality`), [src/analysis/call_graph.zig](src/analysis/call_graph.zig) (`buildCallEdgesWithLimit`), [src/analysis/walker.zig](src/analysis/walker.zig) (`countLines`, `appendFileNode`).
+- [x] Index each file once and avoid reading it again.
+- [x] Replace O(E²) deduplication with hash sets.
+- [ ] Remove the remaining arbitrary limits on entry points, statements and sizes, or make them configurable and safe.
+- [x] Protect indices and counts against overflow and invalid input.
+
+### [ ] CLEANUP-001 — Connect or retire incomplete APIs
+
+- References: [src/metrics/mod.zig](src/metrics/mod.zig), [src/metrics/dead_code.zig](src/metrics/dead_code.zig), [src/core/settings.zig](src/core/settings.zig), [src/core/types.zig](src/core/types.zig).
+- [x] Integrate `Snapshot`, `HeatTracker` and the metric modules or retire their public API: `snapshot.zig`, `heat.zig` and `redundancy.zig` were deleted (they had no consumer and their tests were not even running); redundancy is computed by `dead_code.analyze`.
+- [x] Remove duplicate helpers, dead state and unused score calculations: no orphans, verified by walking `src/**/*.zig` against each module's imports.
+- [ ] Document ownership, invariants and thread-safety of the public APIs.
+- [ ] Add smoke tests for the installed `tdlearn-core` package.
+
+### [ ] CLEANUP-002 — Make the reported duplicates actionable
+
+- References: [src/metrics/dead_code.zig](src/metrics/dead_code.zig) (`collectDuplicateFlags`), the `scan` output in [src/main.zig](src/main.zig).
+- [ ] `scan` only prints `duplicated: 5`; it does not say which functions or where they are, so the number is not actionable without instrumenting the code.
+- [ ] Expose the duplicate groups (members, path, line and body size) in the text and JSON output, next to the count.
+- [ ] Keep the JSON stable: it is an additive field, and `gate`/`check` must not start comparing the list.
+
+### [ ] CI-001 — Automate verification and releases
+
+- References: [.github/workflows/ci.yml](.github/workflows/ci.yml), [build.zig](build.zig) (`addRunCommand`).
+- [x] Add a workflow for `zig fmt --check`, `zig build`, `zig build test` and ReleaseSafe.
+- [x] Run `tdlearn check .` and `tdlearn gate .` against a stable baseline.
+- [x] Include `build.zig.zon` in CI's `zig fmt --check` and in the README's list.
+- [x] Add per-ref `concurrency` with `cancel-in-progress` to avoid accumulating obsolete runs.
+- [x] Limit `push` to `main` and ignore tags, with the avoided cost documented inline in the workflow.
+- [x] Delegate line endings to `.gitattributes` (`* text=auto eol=lf` plus pinned binaries).
+- [ ] Validate against a supported stable Zig version and the target OS matrix.
+- [ ] Publish artifacts, checksums and release tags reproducibly.
+- [ ] Re-enable the tag run once a release workflow exists; today a tag push only repeats the 3-OS matrix.
+
+### [ ] DOC-001 — Align documentation and packaging
+
+- References: [README.md](README.md), [README.es.md](README.es.md), [TODO.md](TODO.md), [TODO.es.md](TODO.es.md), [build.zig.zon](build.zig.zon), [LICENSE](LICENSE), [.gitattributes](.gitattributes).
+- [x] Document installation, `zig build run --`, supported paths, limits and parser limitations.
+- [x] Fix the JSON example so it is valid JSON.
+- [x] Add the `LICENSE` file the README links to.
+- [x] Declare `README.md`, `README.es.md`, `TODO.md`, `TODO.es.md` and `LICENSE` in `paths` of [build.zig.zon](build.zig.zon).
+- [x] Keep every document in English and Spanish in parallel, with a language switcher, links between the documents and links from each document to the code it describes.
+- [x] Keep code, code comments, `rules.toml` comments and CI comments in English, and say so in both READMEs.
+- [ ] Derive the version from a single source (`tool_version` in [src/main.zig](src/main.zig) and `.version` in [build.zig.zon](build.zig.zon) are still duplicated).
+- [x] Fix `paths` entries that reference non-existent directories.
+- [x] Document the TOML, JSON and baseline schemas, compatibility and the migration policy.
+- [x] Document the quality scale: `0–1` in config and baseline, `0–10000` in the output, and why they differ.
+- [x] Document the quality signal scale: geometric mean, the 0.01 floor and the 3981/10000 ceiling.
+- [x] Document the exit codes 0/1/2 and the `error_info` envelope of `--json`.
+- [x] Document what `gate` compares, with what tolerance, and that `total_functions` is not compared.
+- [x] Refresh the output example with real numbers from the repository, labelled as a snapshot.
+
+### [ ] QA-001 — Close the project's own controls
+
+- References: [.tdlearn/rules.toml](.tdlearn/rules.toml), [.tdlearn/baseline.json](.tdlearn/baseline.json).
+- [x] Make `tdlearn check .` pass without disabling relevant limits.
+- [x] Resolve or justify the current file/function size violations.
+- [x] Verify that `tdlearn gate .` only fails on real regressions.
+- [x] Add `max_cycles = 0` so a cycle regression is not hidden by a quality gain.
+- [x] Add `max_cyclomatic = 20` and `max_cognitive = 45` so the complexity tail — the one `equality` measures — cannot rot in silence (see RULES-002).
+- [x] Regenerate `.tdlearn/baseline.json` once the changes that produce it are committed. `total_functions` does not take part in the gate ([src/core/baseline.zig](src/core/baseline.zig), `Baseline.compare`).
+- [ ] Pin the GitHub Actions by SHA, so a moved upstream tag cannot change what CI runs.
+
+### [x] QA-002 — Split `src/core/rules.zig` and lower `max_file_lines`
+
+- References: [src/core/rules.zig](src/core/rules.zig) (1091 lines), [src/core/rules_test.zig](src/core/rules_test.zig) (608), [src/main.zig](src/main.zig) (1152), [src/main_test.zig](src/main_test.zig) (383), [`.tdlearn/rules.toml`](.tdlearn/rules.toml) (`max_file_lines = 1200`), README ("This repository's own rules").
+- [x] Document the `max_file_lines = 1400` exception in `rules.toml` and in the README, instead of raising the limit silently.
+- [x] Move the 388 lines of tests out of `rules.zig` into [src/core/rules_test.zig](src/core/rules_test.zig), which uses nothing but the public API (`parseRules`, `checkRules`, `globMatch`): that also proves the public surface is enough to configure and check a project. `rules.zig` drops to 1091 lines.
+- [x] Move the CLI's tests to [src/main_test.zig](src/main_test.zig) and root the test artifact at that file ([build.zig](build.zig), `addTestStep`), so the dependency is one way (tests → implementation) and no file mixes implementation with tests.
+- [x] Lower `max_file_lines` from 1400 to 1200 (the largest file is `main.zig` at 1152) and drop the documented exception: it no longer applies because no file under `src/` carries its tests inside.
+- Note: adding `main_test.zig` to the graph took `max_depth` from 7 to 8 and the signal down by ~100 points. That is depth measuring what it claims to measure; see METRIC-005.

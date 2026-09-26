@@ -9,6 +9,9 @@
         "build.zig.zon",
         "src",
         "README.md",
+        "README.es.md",
+        "TODO.md",
+        "TODO.es.md",
         "LICENSE",
     },
 }
