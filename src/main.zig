@@ -1133,19 +1133,18 @@ test "oversized and non-parseable files are skipped, not fatal" {
     try std.testing.expectEqual(@as(u32, 1), result.report.file_count);
     try std.testing.expectEqual(@as(u32, 1), result.report.total_functions);
     try std.testing.expectEqual(@as(usize, 2), result.skipped_files.len);
-    try expectSkip(result.skipped_files, "src/big.zig", "parse_too_large");
-    try expectSkip(result.skipped_files, "src/huge.zig", "file_too_large");
+    try std.testing.expectEqualStrings("parse_too_large", skipReason(result.skipped_files, "src/big.zig") orelse "missing");
+    try std.testing.expectEqualStrings("file_too_large", skipReason(result.skipped_files, "src/huge.zig") orelse "missing");
 }
 
-fn expectSkip(skipped: []const analysis.walker.SkippedFile, path: []const u8, reason: []const u8) !void {
+/// Look up the reason a path was skipped. Returns null when the path is absent,
+/// so a missing entry fails the assertion below with "missing" as the value
+/// instead of needing a print to explain what went wrong.
+fn skipReason(skipped: []const analysis.walker.SkippedFile, path: []const u8) ?[]const u8 {
     for (skipped) |entry| {
-        if (std.mem.eql(u8, entry.path, path)) {
-            try std.testing.expectEqualStrings(reason, entry.reason);
-            return;
-        }
+        if (std.mem.eql(u8, entry.path, path)) return entry.reason;
     }
-    std.debug.print("missing skip for {s} in {d} entries\n", .{ path, skipped.len });
-    return error.TestExpectedEqual;
+    return null;
 }
 
 test "temporary project supports check and gate evaluation" {
