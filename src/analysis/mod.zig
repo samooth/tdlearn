@@ -13,5 +13,6 @@ pub const walker = @import("walker.zig");
 
 // Force test discovery in imported files (imports are lazy otherwise).
 test {
+    _ = @import("oom_test.zig");
     std.testing.refAllDecls(@This());
 }

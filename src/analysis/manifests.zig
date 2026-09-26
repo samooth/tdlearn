@@ -47,7 +47,7 @@ pub fn readPackageAliasesAtRoot(
         // Skip manifests inside excluded paths (target/, node_modules/)
         if (isInExcludedDir(path)) continue;
 
-        const contents = readSmallFile(allocator, io, root_path, path) catch continue orelse continue;
+        const contents = (try readSmallFile(allocator, io, root_path, path)) orelse continue;
         const dir = core.path_utils.parentDir(path) orelse "";
 
         if (is_cargo) {
@@ -176,16 +176,16 @@ fn isInExcludedDir(path: []const u8) bool {
 
 fn readSmallFile(allocator: Allocator, io: Io, root_path: []const u8, path: []const u8) !?[]const u8 {
     const full_path = if (root_path.len == 0) path else try std.mem.join(allocator, "/", &.{ root_path, path });
-    const file = std.Io.Dir.cwd().openFile(io, full_path, .{}) catch return null;
+    const file = std.Io.Dir.cwd().openFile(io, full_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
     defer file.close(io);
-    const stat = file.stat(io) catch return null;
+    const stat = try file.stat(io);
     if (stat.size == 0 or stat.size > 64 * 1024) return null;
     const buf = try allocator.alloc(u8, @intCast(stat.size));
-    const bytes_read = file.readPositionalAll(io, buf, 0) catch {
-        allocator.free(buf);
-        return null;
-    };
-    return buf[0..bytes_read];
+    errdefer allocator.free(buf);
+    return buf[0..try file.readPositionalAll(io, buf, 0)];
 }
 
 // ── Tests ─────────────────────────────────────────────────────

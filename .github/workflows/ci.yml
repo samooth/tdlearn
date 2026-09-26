@@ -2,7 +2,25 @@ name: CI
 
 on:
   push:
+    # Default branch only. Feature branches are covered by `pull_request`, so
+    # gating on both would run the 3-OS matrix twice per push. `main` is the
+    # default branch of this repository — if it is ever renamed, this filter
+    # must be renamed with it or push-triggered CI stops silently.
+    branches:
+      - main
+    # No release workflow exists yet (TODO.md CI-001), so a tag push would
+    # only re-run the full matrix to produce nothing. Re-enable this when
+    # releases start publishing artifacts.
+    tags-ignore:
+      - "**"
   pull_request:
+
+# One run per ref; a new push supersedes the in-progress run for that ref.
+# Grouped by ref, not by workflow, so a PR's push run and its pull_request run
+# do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,6 +38,10 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
+      # .gitattributes already forces eol=lf for every text path, so this is
+      # belt-and-braces: it keeps the checkout byte-identical even if an
+      # attribute is ever dropped, which `zig fmt --check` would otherwise
+      # report as a diff on Windows.
       - name: Configure Git line endings
         run: git config --global core.autocrlf false
       - name: Checkout
@@ -29,7 +51,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Check formatting
-        run: zig fmt --check src build.zig
+        run: zig fmt --check src build.zig build.zig.zon
       - name: Build
         run: zig build
       - name: Test Debug
@@ -38,7 +60,10 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe test
       - name: Scan smoke test
         run: zig build run -- scan . --json
+      # Exits 1 on any Error-severity violation, including the documented
+      # max_file_lines ceiling in .tdlearn/rules.toml.
       - name: Rules check
         run: zig build run -- check . --json
+      # Exits 1 on a regression against the committed .tdlearn/baseline.json.
       - name: Quality gate
         run: zig build run -- gate . --json

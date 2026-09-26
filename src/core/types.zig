@@ -27,8 +27,6 @@ pub const FileNode = struct {
     git_status: GitStatus = .none,
     /// Detected programming language (e.g. "rust", "typescript")
     lang: []const u8 = "",
-    /// Structural analysis results if file was parsed
-    structural_analysis: ?StructuralAnalysis = null,
     /// Child nodes (only present for directories)
     children: ?[]FileNode = null,
 };
@@ -41,35 +39,6 @@ pub const GitStatus = enum {
     untracked,
     renamed,
     copied,
-};
-
-// ═══════════════════════════════════════════════════════════════
-// Structural analysis — results for a single parsed file
-// ═══════════════════════════════════════════════════════════════
-
-pub const StructuralAnalysis = struct {
-    /// Detected functions with line ranges and complexity
-    functions: ?[]FuncInfo = null,
-    /// Detected classes, interfaces, and type definitions
-    classes: ?[]ClassInfo = null,
-    /// Import/require targets extracted from source
-    imports: ?[]ImportTarget = null,
-    /// Call-site identifiers detected in the file
-    call_sites: ?[]CallSite = null,
-    /// Semantic tags for classification (e.g. "test", "config", "entry")
-    tags: ?[]Tag = null,
-    /// Comment line count from tree-sitter AST (internal, not serialized)
-    comment_lines: u32 = 0,
-};
-
-pub const Tag = enum {
-    test_file,
-    config,
-    entry,
-    benchmark,
-    example,
-    generated,
-    vendored,
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -91,8 +60,6 @@ pub const FuncInfo = struct {
     cognitive_complexity: ?u32 = null,
     /// Parameter count (excluding self/this)
     param_count: ?u32 = null,
-    /// Body hash for duplication detection
-    body_hash: ?u64 = null,
     /// Whether this function is publicly visible (pub/export/public)
     is_public: bool = false,
     /// Whether this function is a method (has self/this parameter)
@@ -106,8 +73,6 @@ pub const FuncInfo = struct {
 pub const ClassInfo = struct {
     /// Class/interface/type name
     name: []const u8,
-    /// Method names defined in this class
-    methods: ?[]MethodSummary = null,
     /// Base classes / parent types (for inheritance graph)
     bases: ?[][]const u8 = null,
     /// Kind: .class, .interface, .type, .struct, .enum, .trait
@@ -121,40 +86,6 @@ pub const ClassKind = enum {
     struct_kind,
     enum_kind,
     trait,
-};
-
-pub const MethodSummary = struct {
-    name: []const u8,
-    is_public: bool = false,
-};
-
-// ═══════════════════════════════════════════════════════════════
-// Import and call targets
-// ═══════════════════════════════════════════════════════════════
-
-pub const ImportTarget = struct {
-    /// Raw import string from source (e.g. "std.fs", "./helper", "react")
-    raw: []const u8,
-    /// Resolved file path (if resolution succeeded)
-    resolved_path: ?[]const u8 = null,
-    /// Import kind: .direct, .relative, .package, .standard_lib
-    kind: ImportKind = .direct,
-};
-
-pub const ImportKind = enum {
-    direct,
-    relative,
-    package,
-    standard_lib,
-};
-
-pub const CallSite = struct {
-    /// Caller function name
-    caller: []const u8,
-    /// Callee function or symbol name
-    callee: []const u8,
-    /// Line number of the call site
-    line: u32,
 };
 
 /// Functions extracted from one file, paired with the file path and its
@@ -196,47 +127,6 @@ pub const InheritEdge = struct {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// Entry points — detected application entry points
-// ═══════════════════════════════════════════════════════════════
-
-pub const EntryPoint = struct {
-    file: []const u8,
-    func: []const u8,
-    lang: []const u8,
-    confidence: Confidence,
-};
-
-pub const Confidence = enum {
-    high,
-    low,
-};
-
-// ═══════════════════════════════════════════════════════════════
-// File index — cached O(1) lookup metadata
-// ═══════════════════════════════════════════════════════════════
-
-pub const FileIndexEntry = struct {
-    lines: u32,
-    logic: u32,
-    funcs: u32,
-    lang: []const u8,
-    git_status: GitStatus,
-    mtime: i64,
-};
-
-// ═══════════════════════════════════════════════════════════════
-// Error types
-// ═══════════════════════════════════════════════════════════════
-
-pub const ScanError = error{
-    IoError,
-    PathError,
-    ParseError,
-    OutOfMemory,
-    InvalidUtf8,
-};
-
-// ═══════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════
 
@@ -275,6 +165,15 @@ test "FuncInfo defaults" {
         .line_count = 10,
     };
     try std.testing.expectEqual(@as(?u32, null), func.cyclomatic_complexity);
+    try std.testing.expectEqual(@as(?u32, null), func.cognitive_complexity);
+    try std.testing.expectEqual(@as(?u32, null), func.param_count);
     try std.testing.expect(!func.is_public);
     try std.testing.expect(!func.is_method);
+}
+
+test "ClassInfo defaults" {
+    const class = ClassInfo{ .name = "Shape" };
+    try std.testing.expectEqualStrings("Shape", class.name);
+    try std.testing.expectEqual(@as(?[][]const u8, null), class.bases);
+    try std.testing.expectEqual(ClassKind.class, class.kind);
 }

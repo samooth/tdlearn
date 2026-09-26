@@ -9,6 +9,11 @@ const WalkEntry = struct {
     kind: std.Io.File.Kind,
 };
 
+pub const SkippedFile = struct {
+    path: []const u8,
+    reason: []const u8,
+};
+
 fn walkEntryLessThan(_: void, left: WalkEntry, right: WalkEntry) bool {
     return std.mem.lessThan(u8, left.name, right.name);
 }
@@ -26,6 +31,7 @@ pub const Walker = struct {
     root_path: []const u8,
     registry: lang_registry.LangRegistry,
     settings: core.settings.Settings,
+    skipped_files: std.ArrayList(SkippedFile) = .empty,
 
     /// Live allocator — must be computed on demand (arena is self-referential;
     /// capturing `arena.allocator()` at init would dangle after struct copy).
@@ -51,6 +57,7 @@ pub const Walker = struct {
             .root_path = root_path,
             .registry = try lang_registry.LangRegistry.init(parent_allocator),
             .settings = sanitized,
+            .skipped_files = .empty,
         };
     }
 
@@ -69,7 +76,21 @@ pub const Walker = struct {
         try self.walkDir(if (root.len == 0) "." else root, &files);
 
         try normalizePaths(self.allocator(), files.items, self.root_path);
+        try self.normalizeSkippedPaths();
         return try files.toOwnedSlice(self.allocator());
+    }
+
+    /// Skipped files are reported with the same root-relative paths as the file
+    /// nodes, so a consumer can match them against `files`, edges and
+    /// `depth_path` without knowing where the scan was rooted.
+    fn normalizeSkippedPaths(self: *Walker) !void {
+        const normalized_root = normalizeRoot(self.root_path);
+        for (self.skipped_files.items) |*skipped| {
+            skipped.path = try core.path_utils.canonicalRelative(
+                self.allocator(),
+                relativePath(skipped.path, normalized_root),
+            );
+        }
     }
 
     fn normalizePaths(alloc: Allocator, files: []core.types.FileNode, root: []const u8) !void {
@@ -170,23 +191,38 @@ pub const Walker = struct {
                     .children = try child_files.toOwnedSlice(self.allocator()),
                 });
             } else if (entry.kind == .file) {
-                // Count lines
-                const line_counts = try self.countLines(full_path);
-
-                const lang = self.registry.detectLang(name_copy);
-
-                try files.append(self.allocator(), .{
-                    .path = path_copy,
-                    .name = name_copy,
-                    .is_dir = false,
-                    .lines = line_counts.total,
-                    .logic = line_counts.code,
-                    .comments = line_counts.comments,
-                    .blanks = line_counts.blanks,
-                    .lang = lang,
-                });
+                try self.appendFileNode(full_path, path_copy, name_copy, files);
             }
         }
+    }
+
+    fn appendFileNode(
+        self: *Walker,
+        full_path: []const u8,
+        path_copy: []const u8,
+        name: []const u8,
+        files: *std.ArrayList(core.types.FileNode),
+    ) !void {
+        const line_counts = self.countLines(full_path) catch |err| switch (err) {
+            error.FileTooLarge => {
+                try self.skipped_files.append(self.allocator(), .{
+                    .path = path_copy,
+                    .reason = "file_too_large",
+                });
+                return;
+            },
+            else => return err,
+        };
+        try files.append(self.allocator(), .{
+            .path = path_copy,
+            .name = name,
+            .is_dir = false,
+            .lines = line_counts.total,
+            .logic = line_counts.code,
+            .comments = line_counts.comments,
+            .blanks = line_counts.blanks,
+            .lang = self.registry.detectLang(name),
+        });
     }
 
     const LineCounts = struct {
@@ -219,10 +255,15 @@ pub const Walker = struct {
         var code: u32 = 0;
         var comments: u32 = 0;
         var blanks: u32 = 0;
-
+        const newline_count = std.mem.count(u8, contents, "\n");
+        const has_trailing_newline = contents.len > 0 and contents[contents.len - 1] == '\n';
+        var line_index: usize = 0;
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |line| {
-            total += 1;
+            if (has_trailing_newline and line_index == newline_count) {
+                line_index += 1;
+                continue;
+            }
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len == 0) {
                 blanks += 1;
@@ -231,6 +272,8 @@ pub const Walker = struct {
             } else {
                 code += 1;
             }
+            total += 1;
+            line_index += 1;
         }
 
         return .{
@@ -297,7 +340,7 @@ pub const Walker = struct {
     fn collectPathsStandalone(files: []const core.types.FileNode, result: *std.ArrayList([]const u8), alloc: Allocator) !void {
         for (files) |file| {
             if (!file.is_dir) {
-                try result.append(alloc, file.path);
+                try result.append(alloc, try alloc.dupe(u8, file.path));
             }
             if (file.children) |children| {
                 try collectPathsStandalone(children, result, alloc);

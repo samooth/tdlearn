@@ -1,10 +1,41 @@
 # tdlearn rules for tdlearn itself
 # Layer order: HIGHER order = more foundational.
 # A layer may only import layers with >= its own order.
+#
+# Scale: every `min_*` key is a score in [0, 1] — the same scale stored in
+# .tdlearn/baseline.json. The terminal and the JSON output print the same
+# quality signal as an integer per 10000, so `min_quality = 0.7` is
+# "7000/10000", and a `min_*` floor is always compared as a fraction, never
+# as a per-10000 integer.
+#
+# Nothing in this file is written by the tool: `tdlearn gate --save` only
+# rewrites .tdlearn/baseline.json.
 
 [constraints]
+# Geometric mean of the five root-cause scores; see README "Quality Signal".
 min_quality = 0.7
+# Per-root-cause floor, on the normalized `(Q + 0.5) / 1.5` scale.
 min_modularity = 0.5
+# Zero SCC cycles in the union of import, call and inherit edges.
+# Redundant with the acyclicity root cause on purpose: `gate` only fails on a
+# cycle *increase* against the baseline, so this is what keeps a regression
+# from being absorbed by an unrelated quality gain.
+max_cycles = 0
+
+# DOCUMENTED EXCEPTION — the ceiling is 1400, not the 400 shown in the README
+# example. The largest file is src/core/rules.zig at 1308 lines: 920 of
+# implementation (parse, validate, glob-match, check) plus 388 lines of
+# table-driven tests for those exact semantics, which cannot move into a
+# separate test file without also being split from the code under test.
+# The rules schema has no per-file override, so one global ceiling is the only
+# lever available, and 1400 is the narrowest value that still admits that file.
+#
+# 1400 is a ceiling, not a target and not permission to grow. Two things keep
+# it honest: the next file to cross it fails `tdlearn check .` in CI, and
+# lowering the value below 1400 fails until rules.zig is split. The split
+# (e.g. rules_parse.zig / rules_glob.zig / rules_check.zig) is tracked as
+# QA-002 in TODO.md; it is a source refactor and is deliberately not faked
+# here with a threshold bump.
 max_file_lines = 1400
 max_fn_lines = 80
 

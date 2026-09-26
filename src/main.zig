@@ -174,18 +174,23 @@ fn validateRoot(io: std.Io, path: []const u8) !void {
     dir.close(io);
 }
 
-fn readFileOrNull(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
-    const stat = file.stat(io) catch return null;
+    const stat = try file.stat(io);
     if (stat.size == 0) return "";
-    if (stat.size > 2 * 1024 * 1024) return null;
-    const buf = allocator.alloc(u8, @intCast(stat.size)) catch return null;
-    const bytes_read = file.readPositionalAll(io, buf, 0) catch {
-        allocator.free(buf);
-        return null;
-    };
+    if (stat.size > 2 * 1024 * 1024) return error.FileTooLarge;
+    const buf = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(buf);
+    const bytes_read = try file.readPositionalAll(io, buf, 0);
     return buf[0..bytes_read];
+}
+
+fn readOptionalFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?[]const u8 {
+    return readFile(allocator, io, path) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
 }
 
 // ── JSON output shapes (scores scaled ×10000) ────────────────────
@@ -254,6 +259,7 @@ const JsonScan = struct {
     root_causes: JsonRootCauses,
     depth_path: []const []const u8,
     hotspots: []const JsonHotspot,
+    skipped_files: []const analysis.walker.SkippedFile,
 };
 
 const JsonCheck = struct {
@@ -383,6 +389,13 @@ const Analysis = struct {
     max_fn_lines: u32,
     depth_path: []const []const u8,
     hotspots: []const JsonHotspot,
+    skipped_files: []const analysis.walker.SkippedFile,
+};
+
+const GraphBuilds = struct {
+    call_edges: []const core.types.CallEdge,
+    inherit_edges: []const core.types.InheritEdge,
+    report: metrics.HealthReport,
 };
 
 fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8) ![]const []const u8 {
@@ -403,12 +416,27 @@ fn loadSourceContents(
     max_parse_size_kb: u32,
     file_paths: []const []const u8,
     source_contents: *std.ArrayList([]const u8),
+    parsed_paths: *std.ArrayList([]const u8),
     contents_by_path: *std.StringHashMap([]const u8),
+    skipped_files: *std.ArrayList(analysis.walker.SkippedFile),
 ) !void {
     for (file_paths) |fpath| {
         const source_path = if (path.len == 0) fpath else try std.mem.join(arena, "/", &.{ path, fpath });
-        const contents = readFileOrNull(arena, io, source_path) orelse return error.FileNotFound;
-        if (@as(u64, max_parse_size_kb) * 1024 < contents.len) return error.FileTooLarge;
+        // A file that cannot be read within the hard backstop is reported as
+        // skipped, never as a failed run: an unreadable file is a gap in the
+        // data, and `skipped_files` exists to make that gap visible.
+        const contents = readFile(arena, io, source_path) catch |err| switch (err) {
+            error.FileTooLarge => {
+                try skipped_files.append(arena, .{ .path = fpath, .reason = "file_too_large" });
+                continue;
+            },
+            else => return err,
+        };
+        if (@as(u64, max_parse_size_kb) * 1024 < contents.len) {
+            try skipped_files.append(arena, .{ .path = fpath, .reason = "parse_too_large" });
+            continue;
+        }
+        try parsed_paths.append(arena, fpath);
         try source_contents.append(arena, contents);
         try contents_by_path.put(fpath, contents);
     }
@@ -451,6 +479,42 @@ fn extractFunctionData(
     }
 }
 
+fn copySkippedFiles(
+    arena: std.mem.Allocator,
+    source: []const analysis.walker.SkippedFile,
+    destination: *std.ArrayList(analysis.walker.SkippedFile),
+) !void {
+    for (source) |skipped| {
+        try destination.append(arena, .{
+            .path = try arena.dupe(u8, skipped.path),
+            .reason = skipped.reason,
+        });
+    }
+}
+
+fn buildGraphs(
+    arena: std.mem.Allocator,
+    settings: core.settings.Settings,
+    source_files: []const core.types.FileNode,
+    import_edges: []const core.types.ImportEdge,
+    file_funcs: []const metrics.dead_code.FileFuncs,
+    file_classes: []const analysis.inherit_graph.InheritGraphBuilder.FileClasses,
+) !GraphBuilds {
+    const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdgesWithLimit(
+        arena,
+        file_funcs,
+        import_edges,
+        settings.max_call_targets,
+    );
+    const inherit_edges = try analysis.inherit_graph.InheritGraphBuilder.buildInheritEdges(
+        arena,
+        file_classes,
+        import_edges,
+    );
+    const report = try metrics.computeHealth(arena, source_files, import_edges, call_edges, inherit_edges, file_funcs);
+    return .{ .call_edges = call_edges, .inherit_edges = inherit_edges, .report = report };
+}
+
 /// Run walker + graph builder + function extraction + health metrics.
 /// All allocations come from `arena` (caller-owned).
 fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
@@ -464,23 +528,38 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
 
     const all_file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
     const file_paths = try filterSourcePaths(arena, all_file_paths);
+    var parsed_paths = std.ArrayList([]const u8).empty;
+    defer parsed_paths.deinit(arena);
+    var skipped_files = std.ArrayList(analysis.walker.SkippedFile).empty;
+    defer skipped_files.deinit(arena);
+    try copySkippedFiles(arena, walker.skipped_files.items, &skipped_files);
 
     var source_contents = std.ArrayList([]const u8).empty;
     defer source_contents.deinit(arena);
     var contents_by_path = std.StringHashMap([]const u8).init(arena);
     defer contents_by_path.deinit();
-    try loadSourceContents(arena, io, path, settings.max_parse_size_kb, file_paths, &source_contents, &contents_by_path);
+    try loadSourceContents(
+        arena,
+        io,
+        path,
+        settings.max_parse_size_kb,
+        file_paths,
+        &source_contents,
+        &parsed_paths,
+        &contents_by_path,
+        &skipped_files,
+    );
     const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRootWithContents(
         arena,
         io,
         path,
-        all_file_paths,
+        parsed_paths.items,
         contents_by_path,
     );
 
     var source_files = std.ArrayList(core.types.FileNode).empty;
     defer source_files.deinit(arena);
-    try collectSourceNodes(arena, files, file_paths, &source_files);
+    try collectSourceNodes(arena, files, parsed_paths.items, &source_files);
 
     var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
     var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
@@ -489,7 +568,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
     try extractFunctionData(
         arena,
         files,
-        file_paths,
+        parsed_paths.items,
         source_contents.items,
         &file_funcs,
         &file_classes,
@@ -497,39 +576,25 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         &max_fn_lines,
     );
 
-    // Build call graph from extracted functions + import edges
-    const call_edges = try analysis.call_graph.CallGraphBuilder.buildCallEdgesWithLimit(
+    const graphs = try buildGraphs(
         arena,
-        file_funcs.items,
-        import_edges,
-        settings.max_call_targets,
-    );
-
-    // Build inheritance graph from extracted classes + import edges
-    const inherit_edges = try analysis.inherit_graph.InheritGraphBuilder.buildInheritEdges(
-        arena,
-        file_classes.items,
-        import_edges,
-    );
-
-    const report = try metrics.computeHealth(
-        arena,
+        settings,
         source_files.items,
         import_edges,
-        call_edges,
-        inherit_edges,
         file_funcs.items,
+        file_classes.items,
     );
     return finalizeAnalysis(
         arena,
-        report,
+        graphs.report,
         import_edges,
-        call_edges,
-        inherit_edges,
-        file_paths,
+        graphs.call_edges,
+        graphs.inherit_edges,
+        parsed_paths.items,
         file_funcs.items,
         max_file_lines,
         max_fn_lines,
+        skipped_files.items,
     );
 }
 
@@ -543,16 +608,18 @@ fn finalizeAnalysis(
     file_funcs: []const metrics.dead_code.FileFuncs,
     max_file_lines: u32,
     max_fn_lines: u32,
+    skipped_files: []const analysis.walker.SkippedFile,
 ) !Analysis {
     return .{
         .report = report,
         .import_edges = import_edges,
         .call_edges = call_edges,
         .inherit_edges = inherit_edges,
-        .file_paths = file_paths,
+        .file_paths = try arena.dupe([]const u8, file_paths),
         .max_file_lines = max_file_lines,
         .max_fn_lines = max_fn_lines,
         .depth_path = try buildDepthPath(arena, file_paths, import_edges),
+        .skipped_files = try arena.dupe(analysis.walker.SkippedFile, skipped_files),
         .hotspots = try collectHotspots(arena, file_funcs),
     };
 }
@@ -698,6 +765,7 @@ fn makeJsonScan(path: []const u8, result: Analysis) JsonScan {
         },
         .depth_path = result.depth_path,
         .hotspots = result.hotspots,
+        .skipped_files = result.skipped_files,
     };
 }
 
@@ -738,6 +806,12 @@ fn printHumanScan(result: Analysis) void {
             std.debug.print("  {s}:{s} lines={d} cyclomatic={d} cognitive={d}\n", .{ hotspot.file, hotspot.name, hotspot.lines, hotspot.cyclomatic, hotspot.cognitive });
         }
     }
+    if (result.skipped_files.len != 0) {
+        std.debug.print("Skipped files:\n", .{});
+        for (result.skipped_files) |skipped| {
+            std.debug.print("  {s}: {s}\n", .{ skipped.path, skipped.reason });
+        }
+    }
 }
 
 fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
@@ -773,7 +847,7 @@ const GateCompareExecution = struct {
 fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckExecution {
     try validateRoot(io, path);
     const rules_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/rules.toml", .{path});
-    const rules_contents = readFileOrNull(arena, io, rules_path) orelse return error.NoRulesFile;
+    const rules_contents = (try readOptionalFile(arena, io, rules_path)) orelse return error.NoRulesFile;
     const config = try core.rules.parseRules(arena, rules_contents);
     const result = try runAnalysis(arena, io, path);
     const report = result.report;
@@ -892,7 +966,7 @@ fn saveGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateSaveExe
 fn compareGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateCompareExecution {
     try validateRoot(io, path);
     const baseline_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/baseline.json", .{path});
-    const baseline_contents = readFileOrNull(arena, io, baseline_path) orelse return error.NoBaseline;
+    const baseline_contents = (try readOptionalFile(arena, io, baseline_path)) orelse return error.NoBaseline;
     const baseline = try core.baseline.readBaseline(arena, baseline_contents);
     const result = try runAnalysis(arena, io, path);
     const current = core.baseline.Baseline{
@@ -1021,6 +1095,57 @@ test "analysis pipeline runs against a temporary project" {
     try std.testing.expectEqual(@as(usize, 1), result.import_edges.len);
     try std.testing.expectEqual(@as(u32, 2), result.report.total_functions);
     try std.testing.expectEqual(@as(u32, 0), result.report.dead_functions);
+}
+
+test "oversized and non-parseable files are skipped, not fatal" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
+    src_dir.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/small.zig", .data = "pub fn small() void {}\n" });
+
+    // Larger than the 100 KiB parse limit, smaller than the walker's 512 KiB
+    // file limit: the file is walked, counted and then skipped for parsing.
+    const big_line = "pub fn big() void {}\n";
+    var big = try std.testing.allocator.alloc(u8, 101 * 1024);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    @memcpy(big[0..big_line.len], big_line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/big.zig", .data = big });
+
+    // Larger than the walker's 512 KiB file limit: the file never becomes a
+    // node, is not line-counted and never reaches the parser.
+    var huge = try std.testing.allocator.alloc(u8, 600 * 1024);
+    defer std.testing.allocator.free(huge);
+    @memset(huge, 'x');
+    @memcpy(huge[0..big_line.len], big_line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/huge.zig", .data = huge });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const result = try runAnalysis(arena.allocator(), io, project_path);
+
+    // Both oversized files are absent from the graph and from `file_count`; each
+    // is reported with the limit it hit instead of aborting the run.
+    try std.testing.expectEqual(@as(u32, 1), result.report.file_count);
+    try std.testing.expectEqual(@as(u32, 1), result.report.total_functions);
+    try std.testing.expectEqual(@as(usize, 2), result.skipped_files.len);
+    try expectSkip(result.skipped_files, "src/big.zig", "parse_too_large");
+    try expectSkip(result.skipped_files, "src/huge.zig", "file_too_large");
+}
+
+fn expectSkip(skipped: []const analysis.walker.SkippedFile, path: []const u8, reason: []const u8) !void {
+    for (skipped) |entry| {
+        if (std.mem.eql(u8, entry.path, path)) {
+            try std.testing.expectEqualStrings(reason, entry.reason);
+            return;
+        }
+    }
+    std.debug.print("missing skip for {s} in {d} entries\n", .{ path, skipped.len });
+    return error.TestExpectedEqual;
 }
 
 test "temporary project supports check and gate evaluation" {

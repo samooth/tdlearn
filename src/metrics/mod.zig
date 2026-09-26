@@ -7,7 +7,6 @@ pub const dead_code = @import("dead_code.zig");
 pub const depth = @import("depth.zig");
 pub const equality = @import("equality.zig");
 pub const modularity = @import("modularity.zig");
-pub const redundancy = @import("redundancy.zig");
 pub const root_causes = @import("root_causes.zig");
 
 pub const HealthReport = root_causes.HealthReport;
@@ -196,9 +195,9 @@ fn computeEquality(
         }
     }
     if (complexity_values.items.len != 0) {
-        return equality.computeFunctionComplexityGini(complexity_values.items);
+        return equality.computeFunctionComplexityGini(allocator, complexity_values.items);
     }
-    return equality.computeFileSizeGini(file_lines);
+    return equality.computeFileSizeGini(allocator, file_lines);
 }
 
 fn computeFunctionCounts(
@@ -434,4 +433,12 @@ test "compute_health rejects duplicate file nodes" {
         error.DuplicateNode,
         computeHealth(arena.allocator(), &files, &.{}, &.{}, &.{}, &.{}),
     );
+}
+
+test {
+    // Test-only import: the analyzer and its tests are separate files, and this
+    // keeps the dependency one-way while still pulling every dead-code test
+    // into the metrics test binary. It is invisible to non-test builds.
+    _ = @import("dead_code_test.zig");
+    std.testing.refAllDecls(@This());
 }

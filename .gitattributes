@@ -1,7 +1,69 @@
-*.zig text eol=lf
-*.zon text eol=lf
-*.toml text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-*.md text eol=lf
-*.json text eol=lf
+# Line endings are owned by this file, not by core.autocrlf.
+#
+# `* text=auto eol=lf` normalizes every text file to LF in the repository and
+# checks LF out into the working tree on every platform, so `zig fmt --check`
+# sees the same bytes on Linux, macOS and Windows. `auto` still lets Git detect
+# binary content, but detection is a heuristic — the binary patterns below pin
+# the types this repo actually produces so nothing is ever normalized by guess.
+#
+# Order matters: the last matching line for a path wins, so the explicit text
+# patterns after the binaries re-assert `text` for the file types this project
+# is made of.
+* text=auto eol=lf
+
+# ── Binary: never diffed, never line-ending converted ──────────────────────
+*.a        binary
+*.lib      binary
+*.obj      binary
+*.o        binary
+*.so       binary
+*.dylib    binary
+*.dll      binary
+*.exe      binary
+*.pdb      binary
+*.wasm     binary
+*.class    binary
+*.jar      binary
+*.zip      binary
+*.gz       binary
+*.bz2      binary
+*.xz       binary
+*.zst      binary
+*.tar      binary
+*.7z       binary
+*.rar      binary
+*.pdf      binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.webp     binary
+*.ico      binary
+*.bmp      binary
+*.ttf      binary
+*.otf      binary
+*.woff     binary
+*.woff2    binary
+*.mp3      binary
+*.mp4      binary
+*.mov      binary
+*.wav      binary
+
+# ── Text: pinned rather than auto-detected ─────────────────────────────────
+# A misleading extension or a stray CR must still normalize to LF, and these
+# types are the ones `zig fmt --check`, the CI matrix and `tdlearn` all read.
+*.zig      text eol=lf
+*.zon      text eol=lf
+*.toml     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.md       text eol=lf
+*.json     text eol=lf
+*.txt      text eol=lf
+*.sh       text eol=lf
+LICENSE    text eol=lf
+
+# Never touched: merge-conflict and patch machinery, so `git apply`/`git am`
+# can round-trip them and `git diff` output stays verbatim.
+*.patch    -text
+*.diff     -text

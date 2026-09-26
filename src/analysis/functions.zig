@@ -19,7 +19,7 @@ pub const FunctionExtractor = struct {
             line_no += 1;
             var code = std.ArrayList(u8).empty;
             defer code.deinit(allocator);
-            sanitizeLine(allocator, &code, raw_line, lang, &scan_state) catch continue;
+            try sanitizeLine(allocator, &code, raw_line, lang, &scan_state);
             const line = std.mem.trim(u8, code.items, " \t\r");
 
             const base_decl = detectDecl(line, lang) orelse continue;
@@ -30,8 +30,8 @@ pub const FunctionExtractor = struct {
             }
 
             // Find body end via brace matching or Python indentation.
-            const end_line = findBodyEnd(contents, line_no, decl.open_brace, start_indent) catch line_no;
-            const complexity = computeComplexity(allocator, contents, line_no, end_line, lang);
+            const end_line = try findBodyEnd(allocator, contents, line_no, decl.open_brace, start_indent, lang);
+            const complexity = try computeComplexity(allocator, contents, line_no, end_line, lang);
             const is_public = decl.pub_keyword;
             var line_start: usize = 0;
             while (line_start < raw_line.len and (raw_line[line_start] == ' ' or raw_line[line_start] == '\t')) : (line_start += 1) {}
@@ -338,7 +338,7 @@ pub const FunctionExtractor = struct {
         start_line: u32,
         end_line: u32,
         lang: []const u8,
-    ) Complexity {
+    ) !Complexity {
         var result = Complexity{};
         var state = ComplexityState{};
         var nesting: u32 = 0;
@@ -351,7 +351,7 @@ pub const FunctionExtractor = struct {
 
             var code = std.ArrayList(u8).empty;
             defer code.deinit(allocator);
-            sanitizeLine(allocator, &code, raw, lang, &state) catch continue;
+            try sanitizeLine(allocator, &code, raw, lang, &state);
 
             const branches = countBranches(code.items);
             if (branches > 0) {
@@ -526,7 +526,14 @@ pub const FunctionExtractor = struct {
 
     /// Find the last line of a function body by brace matching from the decl line.
     /// For indentation languages (python) uses the next same-or-lower indent boundary.
-    fn findBodyEnd(contents: []const u8, start_line: u32, uses_braces: bool, start_indent: u32) !u32 {
+    fn findBodyEnd(
+        allocator: Allocator,
+        contents: []const u8,
+        start_line: u32,
+        uses_braces: bool,
+        start_indent: u32,
+        lang: []const u8,
+    ) !u32 {
         var total_lines: u32 = 0;
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |_| total_lines += 1;
@@ -546,7 +553,12 @@ pub const FunctionExtractor = struct {
             return last_content_line;
         }
 
-        // Brace matching: walk from start_line, count { and }
+        // Brace matching on comment- and literal-free code. The lexer state
+        // persists across lines so multi-line strings and raw literals do not
+        // desynchronise the depth counter.
+        var state = ComplexityState{};
+        var code = std.ArrayList(u8).empty;
+        defer code.deinit(allocator);
         var depth: i32 = 0;
         var seen_open = false;
         var line_no: u32 = 0;
@@ -554,29 +566,17 @@ pub const FunctionExtractor = struct {
         while (iter.next()) |raw| {
             line_no += 1;
             if (line_no < start_line) continue;
-            var in_string: u8 = 0;
-            var in_line_comment = false;
-            var prev: u8 = 0;
-            for (raw) |c| {
-                if (in_line_comment) break;
-                if (in_string != 0) {
-                    if (c == in_string and prev != '\\') in_string = 0;
-                } else {
-                    if (c == '"' or c == '\'') {
-                        in_string = c;
-                    } else if (c == '/' and prev == '/') {
-                        in_line_comment = true;
-                    } else if (c == '{') {
-                        depth += 1;
-                        seen_open = true;
-                    } else if (c == '}') {
-                        depth -= 1;
-                        if (seen_open and depth <= 0) return line_no;
-                    }
+            code.clearRetainingCapacity();
+            try sanitizeLine(allocator, &code, raw, lang, &state);
+            for (code.items) |c| {
+                if (c == '{') {
+                    depth += 1;
+                    seen_open = true;
+                } else if (c == '}') {
+                    depth -= 1;
+                    if (seen_open and depth <= 0) return line_no;
                 }
-                prev = c;
             }
-            // Multi-line string continuation rough handling: ignore
         }
         return total_lines;
     }
@@ -909,4 +909,40 @@ test "unknown language yields nothing" {
     defer arena.deinit();
     const funcs = try FunctionExtractor.extract(arena.allocator(), "def whatever", "ruby");
     try std.testing.expectEqual(@as(usize, 0), funcs.len);
+}
+
+test "body end ignores braces inside multi-line strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = "fn first() void {\n" ++
+        "    const text = \\multiline\n" ++
+        "        still text\\;\n" ++
+        "}\n" ++
+        "fn second() void {}\n";
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
+    try std.testing.expectEqual(@as(usize, 2), funcs.len);
+    try std.testing.expectEqualStrings("first", funcs[0].name);
+    try std.testing.expectEqual(@as(u32, 4), funcs[0].line_count);
+    try std.testing.expectEqualStrings("second", funcs[1].name);
+    try std.testing.expectEqual(@as(u32, 1), funcs[1].line_count);
+}
+
+test "body end ignores braces inside closed multi-line string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Analyzed source uses a real Zig multiline string spanning lines 3-4 with a
+    // brace inside it; the closing brace of the function is on line 6.
+    const src = "fn first() void {\n" ++
+        "    const text =\n" ++
+        "        \\\\multi { line\n" ++
+        "        \\\\another \\\\\n" ++
+        "    ;\n" ++
+        "}\n" ++
+        "fn second() void {}\n";
+    const funcs = try FunctionExtractor.extract(arena.allocator(), src, "zig");
+    try std.testing.expectEqual(@as(usize, 2), funcs.len);
+    try std.testing.expectEqualStrings("first", funcs[0].name);
+    try std.testing.expectEqual(@as(u32, 6), funcs[0].line_count);
+    try std.testing.expectEqualStrings("second", funcs[1].name);
+    try std.testing.expectEqual(@as(u32, 1), funcs[1].line_count);
 }

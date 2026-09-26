@@ -36,6 +36,14 @@ pub fn sanitizeLine(
     while (index < raw.len) {
         if (try consumeLiteralState(allocator, output, raw, &index, mode, state)) continue;
 
+        if (index == 0 and language == .zig and isZigMultilineStringLine(raw)) {
+            // A Zig multiline string line begins with `\\` after indentation and
+            // is literal content until the newline; the whole line is masked so
+            // braces and quotes inside it never affect the caller.
+            try appendLiteral(allocator, output, raw, mode);
+            break;
+        }
+
         if (language == .python and raw[index] == '#') {
             try appendComment(allocator, output, raw.len - index, mode);
             break;
@@ -127,6 +135,11 @@ fn consumeLiteralState(
     return false;
 }
 
+fn isZigMultilineStringLine(raw: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, raw, " \t");
+    return trimmed.len >= 2 and trimmed[0] == '\\' and trimmed[1] == '\\';
+}
+
 fn hasTripleQuote(raw: []const u8, index: usize, quote: u8) bool {
     return index + 2 < raw.len and raw[index] == quote and raw[index + 1] == quote and raw[index + 2] == quote;
 }
@@ -190,4 +203,14 @@ test "lexer carries multiline literal state" {
     try sanitizeLine(allocator, &output, "text = \"\"\"start", .python, .discard_literals, &state);
     try sanitizeLine(allocator, &output, "end\"\"\"", .python, .discard_literals, &state);
     try std.testing.expectEqualStrings("text =               ", output.items);
+}
+
+test "lexer masks zig multiline string lines entirely" {
+    const allocator = std.testing.allocator;
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+    var state = State{};
+    try sanitizeLine(allocator, &output, "    \\\\has { brace and \\\"quote", .zig, .discard_literals, &state);
+    try std.testing.expect(std.mem.indexOfScalar(u8, output.items, '{') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, output.items, '"') == null);
 }
