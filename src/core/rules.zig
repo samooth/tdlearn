@@ -26,6 +26,11 @@ pub const RulesConfig = struct {
         max_cycles: ?u32 = null,
         max_file_lines: ?u32 = null,
         max_fn_lines: ?u32 = null,
+        /// Per-function ceilings. Unlike `max_fn_lines`, which reports the
+        /// single largest function, these report *every* offending function, so
+        /// the result is a work list rather than a number to look up.
+        max_cyclomatic: ?u32 = null,
+        max_cognitive: ?u32 = null,
     };
 
     pub const Layer = struct {
@@ -58,6 +63,27 @@ pub const Violation = struct {
     severity: Severity,
     message: []const u8,
     files: []const []const u8 = &.{},
+    /// What the violation is about, when the rule identifies one: today only
+    /// the per-function complexity ceilings do, and it is the function name.
+    /// `null` for aggregate and edge rules, so consumers can treat the field
+    /// as "the offending symbol" without parsing the message.
+    subject: ?[]const u8 = null,
+    /// 1-based line of `subject` when the rule knows it, so a CI integration
+    /// can annotate the exact line and so violations of the same file sort in
+    /// source order instead of lexicographic order ("9" after "10").
+    line: ?u32 = null,
+};
+
+/// One function's measured complexity, as the rules engine sees it. Declared
+/// here rather than reused from the analysis layer because `core` is the
+/// foundational layer and must not depend on `analysis`/`metrics`; `main`
+/// maps the extracted functions onto this shape.
+pub const FunctionComplexity = struct {
+    file: []const u8,
+    name: []const u8,
+    line: u32,
+    cyclomatic: u32,
+    cognitive: u32,
 };
 
 pub const CheckInput = struct {
@@ -71,6 +97,10 @@ pub const CheckInput = struct {
     cycle_count: u32,
     max_file_lines: u32,
     max_fn_lines: u32,
+    /// Every extracted function with its measured complexity, used by
+    /// `max_cyclomatic` / `max_cognitive`. Functions with no complexity data
+    /// are counted as 0 and therefore never violate a ceiling.
+    functions: []const FunctionComplexity = &.{},
     /// All import edges (from_file, to_file)
     import_edges: []const Edge,
     /// All scanned file paths
@@ -126,6 +156,12 @@ fn parseConstraints(toml: *const toml_mod.Toml, config: *RulesConfig) void {
     }
     if (table.get("max_fn_lines")) |value| {
         if (value.asInt()) |number| config.constraints.max_fn_lines = @intCast(@max(0, number));
+    }
+    if (table.get("max_cyclomatic")) |value| {
+        if (value.asInt()) |number| config.constraints.max_cyclomatic = @intCast(@max(0, number));
+    }
+    if (table.get("max_cognitive")) |value| {
+        if (value.asInt()) |number| config.constraints.max_cognitive = @intCast(@max(0, number));
     }
 }
 
@@ -223,6 +259,11 @@ fn validateLayerName(name: []const u8) !void {
     if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidRules;
 }
 
+/// A glob pattern is a sequence of `/`-separated segments, each of which may
+/// contain `*`, `?` and backslash escapes. Rejected: empty or non-UTF-8 input,
+/// absolute paths, Windows drive prefixes, empty/`.`/`..` segments, unbalanced
+/// `[`/`]`, control characters, a trailing escape, and more than one `*` in a
+/// segment unless the whole segment is exactly `**`.
 fn validatePattern(pattern: []const u8) !void {
     if (pattern.len == 0 or !std.unicode.utf8ValidateSlice(pattern)) return error.InvalidRules;
     if (std.mem.startsWith(u8, pattern, "/")) return error.InvalidRules;
@@ -230,26 +271,31 @@ fn validatePattern(pattern: []const u8) !void {
     var segments = std.mem.splitScalar(u8, pattern, '/');
     while (segments.next()) |segment| {
         if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidRules;
-        var stars: usize = 0;
-        var index: usize = 0;
-        while (index < segment.len) : (index += 1) {
-            if (segment[index] == '\\') {
-                if (index + 1 >= segment.len) return error.InvalidRules;
-                index += 1;
-                continue;
-            }
-            if (segment[index] == '*') {
-                stars += 1;
-            } else if (segment[index] == '?') {
-                continue;
-            } else if (segment[index] == '[' or segment[index] == ']') {
-                return error.InvalidRules;
-            } else if (segment[index] < 0x20 or segment[index] == 0x7f) {
-                return error.InvalidRules;
-            }
-        }
-        if (stars > 1 and !std.mem.eql(u8, segment, "**")) return error.InvalidRules;
+        try validatePatternSegment(segment);
     }
+}
+
+fn validatePatternSegment(segment: []const u8) !void {
+    var stars: usize = 0;
+    var index: usize = 0;
+    while (index < segment.len) : (index += 1) {
+        const c = segment[index];
+        if (c == '\\') {
+            if (index + 1 >= segment.len) return error.InvalidRules;
+            index += 1;
+            continue;
+        }
+        if (c == '*') {
+            stars += 1;
+            continue;
+        }
+        if (c == '?' or c == '[' or c == ']') {
+            if (c == '[' or c == ']') return error.InvalidRules;
+            continue;
+        }
+        if (c < 0x20 or c == 0x7f) return error.InvalidRules;
+    }
+    if (stars > 1 and !std.mem.eql(u8, segment, "**")) return error.InvalidRules;
 }
 
 fn normalizePattern(allocator: Allocator, pattern: []const u8) ![]const u8 {
@@ -284,11 +330,13 @@ fn validateInputPath(path: []const u8) !void {
     }
 }
 
+/// A key already assigned in the current section, used to reject duplicates.
+const SeenKey = struct {
+    section: []const u8,
+    key: []const u8,
+};
+
 fn validateTomlSyntax(allocator: Allocator, contents: []const u8) !void {
-    const SeenKey = struct {
-        section: []const u8,
-        key: []const u8,
-    };
     var seen = std.ArrayList(SeenKey).empty;
     defer seen.deinit(allocator);
     var current_section: []const u8 = "";
@@ -300,43 +348,59 @@ fn validateTomlSyntax(allocator: Allocator, contents: []const u8) !void {
         if (line.len == 0) continue;
 
         if (line[0] == '[') {
-            if (std.mem.startsWith(u8, line, "[[")) {
-                if (line.len < 4 or !std.mem.endsWith(u8, line, "]]")) return error.InvalidRules;
-                current_section = std.mem.trim(u8, line[2 .. line.len - 2], " \t");
-                array_section = true;
-                seen.clearRetainingCapacity();
-            } else {
-                if (line.len < 2 or !std.mem.endsWith(u8, line, "]")) return error.InvalidRules;
-                const next_section = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
-                if (!array_section and current_section.len > 0 and
-                    std.mem.eql(u8, current_section, next_section))
-                {
-                    return error.InvalidRules;
-                }
-                current_section = next_section;
-                array_section = false;
-                seen.clearRetainingCapacity();
-            }
+            const section = try sectionHeader(line, current_section, array_section);
+            current_section = section.name;
+            array_section = section.is_array;
+            // A new section restarts the duplicate-key scope.
+            seen.clearRetainingCapacity();
             continue;
         }
 
         const separator = findAssignment(line) orelse return error.InvalidRules;
         const key = std.mem.trim(u8, line[0..separator], " \t");
         const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
-        if (key.len == 0 or value.len == 0) return error.InvalidRules;
-        if (value[0] == '\'') return error.InvalidRules;
-        if (value[0] == '"' and !hasClosingQuote(value)) return error.InvalidRules;
-        if (value[0] == '[' and !hasClosingBracket(value)) return error.InvalidRules;
-
-        for (seen.items) |entry| {
-            if (std.mem.eql(u8, entry.section, current_section) and
-                std.mem.eql(u8, entry.key, key))
-            {
-                return error.InvalidRules;
-            }
-        }
+        try validateAssignment(key, value);
+        if (wasSeen(seen.items, current_section, key)) return error.InvalidRules;
         try seen.append(allocator, .{ .section = current_section, .key = key });
     }
+}
+
+const SectionHeader = struct {
+    name: []const u8,
+    is_array: bool,
+};
+
+/// Parse a `[name]` or `[[name]]` line. A `[name]` that repeats the current
+/// non-array section is a duplicate-section error; the same name in a different
+/// section, or repeated as an array of tables, is fine.
+fn sectionHeader(line: []const u8, current_section: []const u8, array_section: bool) !SectionHeader {
+    if (std.mem.startsWith(u8, line, "[[")) {
+        if (line.len < 4 or !std.mem.endsWith(u8, line, "]]")) return error.InvalidRules;
+        return .{
+            .name = std.mem.trim(u8, line[2 .. line.len - 2], " \t"),
+            .is_array = true,
+        };
+    }
+    if (line.len < 2 or !std.mem.endsWith(u8, line, "]")) return error.InvalidRules;
+    const name = std.mem.trim(u8, line[1 .. line.len - 1], " \t");
+    if (!array_section and current_section.len > 0 and std.mem.eql(u8, current_section, name)) {
+        return error.InvalidRules;
+    }
+    return .{ .name = name, .is_array = false };
+}
+
+fn validateAssignment(key: []const u8, value: []const u8) !void {
+    if (key.len == 0 or value.len == 0) return error.InvalidRules;
+    if (value[0] == '\'') return error.InvalidRules;
+    if (value[0] == '"' and !hasClosingQuote(value)) return error.InvalidRules;
+    if (value[0] == '[' and !hasClosingBracket(value)) return error.InvalidRules;
+}
+
+fn wasSeen(seen: []const SeenKey, section: []const u8, key: []const u8) bool {
+    for (seen) |entry| {
+        if (std.mem.eql(u8, entry.section, section) and std.mem.eql(u8, entry.key, key)) return true;
+    }
+    return false;
 }
 
 fn stripTomlComment(line: []const u8) []const u8 {
@@ -523,7 +587,13 @@ fn isScoreKey(key: []const u8) bool {
 }
 
 fn isUnsignedKey(key: []const u8) bool {
-    const keys = [_][]const u8{ "max_cycles", "max_file_lines", "max_fn_lines" };
+    const keys = [_][]const u8{
+        "max_cycles",
+        "max_file_lines",
+        "max_fn_lines",
+        "max_cyclomatic",
+        "max_cognitive",
+    };
     for (keys) |candidate| {
         if (std.mem.eql(u8, key, candidate)) return true;
     }
@@ -610,6 +680,15 @@ fn checkBoundaryRules(
     }
 }
 
+/// A `min_*` floor: the rule name, how it reads in a message, the observed
+/// value and the configured floor (null when the rule is not set).
+const ScoreFloor = struct {
+    key: []const u8,
+    label: []const u8,
+    observed: f64,
+    min: ?f64,
+};
+
 fn checkConstraintRules(
     allocator: Allocator,
     constraints: *const RulesConfig.Constraints,
@@ -617,54 +696,58 @@ fn checkConstraintRules(
     violations: *std.ArrayList(Violation),
     checked: *u32,
 ) !void {
-    if (constraints.min_quality) |min| {
+    try checkScoreFloors(allocator, constraints, input, violations, checked);
+    try checkCeilings(allocator, constraints, input, violations, checked);
+}
+
+/// The six `min_*` floors. Every score floor in one table, so adding a root
+/// cause means adding a row instead of another six-line copy of the same shape.
+fn checkScoreFloors(
+    allocator: Allocator,
+    constraints: *const RulesConfig.Constraints,
+    input: *const CheckInput,
+    violations: *std.ArrayList(Violation),
+    checked: *u32,
+) !void {
+    const floors = [_]ScoreFloor{
+        .{ .key = "min_quality", .label = "quality", .observed = input.quality_signal, .min = constraints.min_quality },
+        .{ .key = "min_modularity", .label = "modularity", .observed = input.modularity, .min = constraints.min_modularity },
+        .{ .key = "min_acyclicity", .label = "acyclicity", .observed = input.acyclicity, .min = constraints.min_acyclicity },
+        .{ .key = "min_depth", .label = "depth score", .observed = input.depth, .min = constraints.min_depth },
+        .{ .key = "min_equality", .label = "equality", .observed = input.equality, .min = constraints.min_equality },
+        .{ .key = "min_redundancy", .label = "redundancy", .observed = input.redundancy, .min = constraints.min_redundancy },
+    };
+    for (floors) |floor| {
+        const min = floor.min orelse continue;
         checked.* += 1;
-        if (input.quality_signal < min) try violations.append(allocator, .{
-            .rule = "min_quality",
+        if (floor.observed >= min) continue;
+        // Acyclicity is the one score with a second, countable fact behind it.
+        if (std.mem.eql(u8, floor.key, "min_acyclicity")) {
+            try violations.append(allocator, .{
+                .rule = floor.key,
+                .severity = .err,
+                .message = try std.fmt.allocPrint(allocator, "{s} {d:.3} < required {d:.3} ({d} cycles)", .{ floor.label, floor.observed, min, input.cycle_count }),
+            });
+            continue;
+        }
+        try violations.append(allocator, .{
+            .rule = floor.key,
             .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "quality {d:.3} < required {d:.3}", .{ input.quality_signal, min }),
+            .message = try std.fmt.allocPrint(allocator, "{s} {d:.3} < required {d:.3}", .{ floor.label, floor.observed, min }),
         });
     }
-    if (constraints.min_modularity) |min| {
-        checked.* += 1;
-        if (input.modularity < min) try violations.append(allocator, .{
-            .rule = "min_modularity",
-            .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "modularity {d:.3} < required {d:.3}", .{ input.modularity, min }),
-        });
-    }
-    if (constraints.min_acyclicity) |min| {
-        checked.* += 1;
-        if (input.acyclicity < min) try violations.append(allocator, .{
-            .rule = "min_acyclicity",
-            .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "acyclicity {d:.3} < required {d:.3} ({d} cycles)", .{ input.acyclicity, min, input.cycle_count }),
-        });
-    }
-    if (constraints.min_depth) |min| {
-        checked.* += 1;
-        if (input.depth < min) try violations.append(allocator, .{
-            .rule = "min_depth",
-            .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "depth score {d:.3} < required {d:.3}", .{ input.depth, min }),
-        });
-    }
-    if (constraints.min_equality) |min| {
-        checked.* += 1;
-        if (input.equality < min) try violations.append(allocator, .{
-            .rule = "min_equality",
-            .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "equality {d:.3} < required {d:.3}", .{ input.equality, min }),
-        });
-    }
-    if (constraints.min_redundancy) |min| {
-        checked.* += 1;
-        if (input.redundancy < min) try violations.append(allocator, .{
-            .rule = "min_redundancy",
-            .severity = .err,
-            .message = try std.fmt.allocPrint(allocator, "redundancy {d:.3} < required {d:.3}", .{ input.redundancy, min }),
-        });
-    }
+}
+
+/// The `max_*` ceilings. Cycles, file size and function size report the single
+/// largest value; the two complexity ceilings report every offending function,
+/// because the number of offenders is the work list.
+fn checkCeilings(
+    allocator: Allocator,
+    constraints: *const RulesConfig.Constraints,
+    input: *const CheckInput,
+    violations: *std.ArrayList(Violation),
+    checked: *u32,
+) !void {
     if (constraints.max_cycles) |max| {
         checked.* += 1;
         if (input.cycle_count > max) try violations.append(allocator, .{
@@ -689,6 +772,78 @@ fn checkConstraintRules(
             .message = try std.fmt.allocPrint(allocator, "largest function has {d} lines > allowed {d}", .{ input.max_fn_lines, max }),
         });
     }
+    if (constraints.max_cyclomatic) |max| {
+        checked.* += 1;
+        try checkComplexityCeiling(allocator, input.functions, max, .cyclomatic, violations);
+    }
+    if (constraints.max_cognitive) |max| {
+        checked.* += 1;
+        try checkComplexityCeiling(allocator, input.functions, max, .cognitive, violations);
+    }
+}
+
+/// Which complexity number a ceiling applies to. Keeping it as an enum rather
+/// than a field pointer means the two ceilings cannot drift apart in how they
+/// read, count or report a function.
+const ComplexityKind = enum {
+    cyclomatic,
+    cognitive,
+
+    /// Must equal the configuration key that sets this ceiling, so a violation
+    /// names the knob the user has to edit.
+    fn ruleName(self: ComplexityKind) []const u8 {
+        return switch (self) {
+            .cyclomatic => "max_cyclomatic",
+            .cognitive => "max_cognitive",
+        };
+    }
+
+    fn label(self: ComplexityKind) []const u8 {
+        return switch (self) {
+            .cyclomatic => "cyclomatic complexity",
+            .cognitive => "cognitive complexity",
+        };
+    }
+
+    fn of(self: ComplexityKind, function: FunctionComplexity) u32 {
+        return switch (self) {
+            .cyclomatic => function.cyclomatic,
+            .cognitive => function.cognitive,
+        };
+    }
+};
+
+/// Emit one violation per function over the ceiling, naming the file, the
+/// line, the function and both numbers, so the message is enough to act on
+/// and a JSON consumer can group by `from` + `subject` without parsing text.
+fn checkComplexityCeiling(
+    allocator: Allocator,
+    functions: []const FunctionComplexity,
+    max: u32,
+    kind: ComplexityKind,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (functions) |function| {
+        const value = kind.of(function);
+        if (value <= max) continue;
+        const files = try allocator.alloc([]const u8, 1);
+        files[0] = function.file;
+        try violations.append(allocator, .{
+            .rule = kind.ruleName(),
+            .severity = .err,
+            .message = try std.fmt.allocPrint(allocator, "{s}:{d}: {s} has {s} {d} > allowed {d}", .{
+                function.file,
+                function.line,
+                function.name,
+                kind.label(),
+                value,
+                max,
+            }),
+            .files = files,
+            .subject = function.name,
+            .line = function.line,
+        });
+    }
 }
 
 /// Check a scan against rules. Returns violations (empty = pass).
@@ -703,6 +858,10 @@ pub fn checkRules(allocator: Allocator, config: *const RulesConfig, input: *cons
         try validateInputPath(edge.from);
         try validateInputPath(edge.to);
     }
+    // Function paths end up in violation messages and in the JSON `from`
+    // field, so they are held to the same canonical shape as every other path
+    // the rules engine accepts.
+    for (input.functions) |function| try validateInputPath(function.file);
 
     const c = &config.constraints;
     var checked: u32 = 0;
@@ -736,11 +895,24 @@ fn violationLessThan(_: void, left: Violation, right: Violation) bool {
     const to_order = std.mem.order(u8, fileAt(left, 1), fileAt(right, 1));
     if (to_order == .lt) return true;
     if (to_order == .gt) return false;
+    // Same file and rule: source order when both violations know their line.
+    if (left.line != null and right.line != null and left.line.? != right.line.?) {
+        return left.line.? < right.line.?;
+    }
     return std.mem.lessThan(u8, left.message, right.message);
 }
 
+/// Two violations are the same finding only when rule, subject, files *and*
+/// message agree. Comparing files alone is not enough: the per-function
+/// complexity ceilings emit several violations that share a rule and a file
+/// and differ only by function, and those must all survive deduplication.
 fn sameViolation(left: Violation, right: Violation) bool {
     if (!std.mem.eql(u8, left.rule, right.rule) or left.files.len != right.files.len) return false;
+    if (!std.mem.eql(u8, left.message, right.message)) return false;
+    if ((left.subject == null) != (right.subject == null)) return false;
+    if (left.subject) |subject| {
+        if (!std.mem.eql(u8, subject, right.subject.?)) return false;
+    }
     for (left.files, 0..) |file, index| {
         if (!std.mem.eql(u8, file, right.files[index])) return false;
     }
@@ -916,393 +1088,4 @@ fn utf8SequenceLength(first: u8) ?usize {
         0xf0...0xf4 => 4,
         else => null,
     };
-}
-
-// ── Tests ─────────────────────────────────────────────────────
-
-test "glob match basics" {
-    try std.testing.expect(globMatch("src/core/types.zig", "src/core/types.zig"));
-    try std.testing.expect(!globMatch("src/core", "src/metrics/mod.zig"));
-    try std.testing.expect(globMatch("src/core", "src/core/types.zig"));
-    try std.testing.expect(globMatch("src/core/**", "src/core/deep/nested/file.zig"));
-    try std.testing.expect(globMatch("src/core/**", "src/core/types.zig"));
-    try std.testing.expect(globMatch("src/**/*", "src/anything/deep.zig"));
-    try std.testing.expect(globMatch("src/*", "src/top.zig"));
-    try std.testing.expect(!globMatch("src/*", "src/sub/deep.zig"));
-    try std.testing.expect(globMatch("*.zig", "any/file.zig"));
-    try std.testing.expect(!globMatch("*.zig", "file.rs"));
-    try std.testing.expect(globMatch("src/foo*.zig", "src/foobar.zig"));
-    try std.testing.expect(!globMatch("src/foo*.zig", "src/bar.zig"));
-}
-
-test "glob escapes and unicode wildcards" {
-    try std.testing.expect(globMatch("src/\\*.zig", "src/*.zig"));
-    try std.testing.expect(!globMatch("src/\\*.zig", "src/file.zig"));
-    try std.testing.expect(globMatch("src/?.zig", "src/é.zig"));
-    try std.testing.expect(!globMatch("src/?.zig", "src/éé.zig"));
-    try std.testing.expect(globMatch("src/Ж*.zig", "src/Журнал.zig"));
-    try std.testing.expect(globMatch("src\\core\\*.zig", "src/core/file.zig"));
-}
-
-test "glob segment boundaries" {
-    try std.testing.expect(globMatch("src/**/test.zig", "src/a/b/test.zig"));
-    try std.testing.expect(!globMatch("src/*/test.zig", "src/a/b/test.zig"));
-    try std.testing.expect(globMatch("**/*.zig", "a/b.zig"));
-    try std.testing.expect(!globMatch("src/*.zig", "src/a/b.zig"));
-    try std.testing.expect(globMatch("src/core", "src/core/types.zig"));
-}
-
-test "parse rules constraints" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = 0.7
-        \\max_cycles = 0
-        \\max_file_lines = 500
-    );
-    try std.testing.expectApproxEqAbs(@as(f64, 0.7), config.constraints.min_quality.?, 0.001);
-    try std.testing.expectEqual(@as(u32, 0), config.constraints.max_cycles.?);
-    try std.testing.expectEqual(@as(u32, 500), config.constraints.max_file_lines.?);
-    try std.testing.expect(config.constraints.min_modularity == null);
-}
-
-test "parse layers and boundaries" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/core/**"]
-        \\order = 0
-        \\
-        \\[[layers]]
-        \\name = "app"
-        \\paths = ["src/app/**", "src/main.zig"]
-        \\order = 1
-        \\
-        \\[[boundaries]]
-        \\from = "src/app/**"
-        \\to = "src/renderer/**"
-        \\reason = "app must not draw"
-    );
-    try std.testing.expectEqual(@as(usize, 2), config.layers.len);
-    try std.testing.expectEqualStrings("core", config.layers[0].name);
-    try std.testing.expectEqual(@as(u32, 0), config.layers[0].order);
-    try std.testing.expectEqual(@as(u32, 1), config.layers[1].order);
-    try std.testing.expectEqual(@as(usize, 1), config.boundaries.len);
-    try std.testing.expectEqualStrings("app must not draw", config.boundaries[0].reason);
-}
-
-test "parse rules rejects invalid values" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = 1.5
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\max_cycles = -1
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\unknown = 1
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality 0.7
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = "0.7
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = 0.7
-        \\min_quality = 0.8
-    ));
-}
-
-test "parse rules rejects incomplete layers" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-    ));
-}
-
-test "parse rules normalizes Windows separators" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src\core\types.zig", "src\core\*.zig", "src/\*.zig"]
-        \\order = 0
-    );
-    try std.testing.expectEqualStrings("src/core/types.zig", config.layers[0].paths[0]);
-    try std.testing.expectEqualStrings("src/core/*.zig", config.layers[0].paths[1]);
-    try std.testing.expectEqualStrings("src/\\*.zig", config.layers[0].paths[2]);
-}
-
-test "parse rules rejects invalid layer names and paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "bad name"
-        \\paths = ["src/**"]
-        \\order = 0
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["/absolute/**"]
-        \\order = 0
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/../outside/**"]
-        \\order = 0
-    ));
-}
-
-test "parse rules rejects duplicate layer names and patterns" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/**"]
-        \\order = 0
-        \\
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["lib/**"]
-        \\order = 1
-    ));
-    try std.testing.expectError(error.InvalidRules, parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/**"]
-        \\order = 0
-        \\
-        \\[[layers]]
-        \\name = "app"
-        \\paths = ["src/**"]
-        \\order = 1
-    ));
-}
-
-test "check constraints pass" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = 0.5
-        \\max_cycles = 2
-    );
-    const input = CheckInput{
-        .quality_signal = 0.8,
-        .modularity = 0.6,
-        .acyclicity = 1.0,
-        .depth = 0.9,
-        .equality = 0.7,
-        .redundancy = 0.95,
-        .cycle_count = 1,
-        .max_file_lines = 100,
-        .max_fn_lines = 50,
-        .import_edges = &.{},
-        .file_paths = &.{},
-    };
-    const result = try checkRules(arena.allocator(), &config, &input);
-    try std.testing.expect(result.pass());
-    try std.testing.expectEqual(@as(u32, 2), result.rules_checked);
-}
-
-test "check constraints fail" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[constraints]
-        \\min_quality = 0.9
-        \\max_cycles = 0
-    );
-    const input = CheckInput{
-        .quality_signal = 0.5,
-        .modularity = 0.5,
-        .acyclicity = 0.5,
-        .depth = 0.5,
-        .equality = 0.5,
-        .redundancy = 0.5,
-        .cycle_count = 3,
-        .max_file_lines = 100,
-        .max_fn_lines = 50,
-        .import_edges = &.{},
-        .file_paths = &.{},
-    };
-    const result = try checkRules(arena.allocator(), &config, &input);
-    try std.testing.expect(!result.pass());
-    // Both min_quality and max_cycles violated
-    try std.testing.expectEqual(@as(usize, 2), result.violations.len);
-}
-
-test "layer order violation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/core/**"]
-        \\order = 0
-        \\
-        \\[[layers]]
-        \\name = "app"
-        \\paths = ["src/app/**"]
-        \\order = 1
-    );
-    // app (order 1) imports core (order 0) — violation: 1 > 0
-    // core (order 0) imports app (order 1) — OK: 0 < 1
-    const edges = [_]CheckInput.Edge{
-        .{ .from = "src/app/main.zig", .to = "src/core/types.zig" },
-        .{ .from = "src/core/types.zig", .to = "src/app/main.zig" },
-    };
-    const input = CheckInput{
-        .quality_signal = 1.0,
-        .modularity = 1.0,
-        .acyclicity = 1.0,
-        .depth = 1.0,
-        .equality = 1.0,
-        .redundancy = 1.0,
-        .cycle_count = 0,
-        .max_file_lines = 10,
-        .max_fn_lines = 10,
-        .import_edges = &edges,
-        .file_paths = &.{},
-    };
-    const result = try checkRules(arena.allocator(), &config, &input);
-    try std.testing.expect(!result.pass());
-    try std.testing.expectEqual(@as(usize, 1), result.violations.len);
-    try std.testing.expectEqualStrings("layer_order", result.violations[0].rule);
-}
-
-test "ambiguous layers are rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[layers]]
-        \\name = "core"
-        \\paths = ["src/*"]
-        \\order = 0
-        \\
-        \\[[layers]]
-        \\name = "app"
-        \\paths = ["src/**"]
-        \\order = 1
-    );
-    const input = CheckInput{
-        .quality_signal = 1.0,
-        .modularity = 1.0,
-        .acyclicity = 1.0,
-        .depth = 1.0,
-        .equality = 1.0,
-        .redundancy = 1.0,
-        .cycle_count = 0,
-        .max_file_lines = 10,
-        .max_fn_lines = 10,
-        .import_edges = &.{},
-        .file_paths = &[_][]const u8{"src/file.zig"},
-    };
-    try std.testing.expectError(error.AmbiguousLayer, checkRules(arena.allocator(), &config, &input));
-}
-
-test "violations are deduplicated and deterministically ordered" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[boundaries]]
-        \\from = "src/**"
-        \\to = "lib/**"
-        \\
-        \\[[boundaries]]
-        \\from = "src/*"
-        \\to = "lib/*"
-    );
-    const edges = [_]CheckInput.Edge{
-        .{ .from = "src/z.zig", .to = "lib/b.zig" },
-        .{ .from = "src/a.zig", .to = "lib/a.zig" },
-        .{ .from = "src/z.zig", .to = "lib/b.zig" },
-    };
-    const input = CheckInput{
-        .quality_signal = 1.0,
-        .modularity = 1.0,
-        .acyclicity = 1.0,
-        .depth = 1.0,
-        .equality = 1.0,
-        .redundancy = 1.0,
-        .cycle_count = 0,
-        .max_file_lines = 10,
-        .max_fn_lines = 10,
-        .import_edges = &edges,
-        .file_paths = &.{},
-    };
-    const result = try checkRules(arena.allocator(), &config, &input);
-    try std.testing.expectEqual(@as(usize, 2), result.violations.len);
-    try std.testing.expectEqualStrings("src/a.zig", result.violations[0].files[0]);
-    try std.testing.expectEqualStrings("src/z.zig", result.violations[1].files[0]);
-}
-
-test "check rules rejects absolute input paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(), "[constraints]\nmin_quality = 0.5");
-    const edges = [_]CheckInput.Edge{.{ .from = "/tmp/a.zig", .to = "src/b.zig" }};
-    const input = CheckInput{
-        .quality_signal = 1.0,
-        .modularity = 1.0,
-        .acyclicity = 1.0,
-        .depth = 1.0,
-        .equality = 1.0,
-        .redundancy = 1.0,
-        .cycle_count = 0,
-        .max_file_lines = 10,
-        .max_fn_lines = 10,
-        .import_edges = &edges,
-        .file_paths = &.{},
-    };
-    try std.testing.expectError(error.InvalidPath, checkRules(arena.allocator(), &config, &input));
-}
-
-test "boundary violation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const config = try parseRules(arena.allocator(),
-        \\[[boundaries]]
-        \\from = "src/renderer/**"
-        \\to = "src/analysis/**"
-    );
-    const edges = [_]CheckInput.Edge{
-        .{ .from = "src/renderer/panel.zig", .to = "src/analysis/walker.zig" },
-        .{ .from = "src/renderer/panel.zig", .to = "src/core/types.zig" },
-    };
-    const input = CheckInput{
-        .quality_signal = 1.0,
-        .modularity = 1.0,
-        .acyclicity = 1.0,
-        .depth = 1.0,
-        .equality = 1.0,
-        .redundancy = 1.0,
-        .cycle_count = 0,
-        .max_file_lines = 10,
-        .max_fn_lines = 10,
-        .import_edges = &edges,
-        .file_paths = &.{},
-    };
-    const result = try checkRules(arena.allocator(), &config, &input);
-    try std.testing.expect(!result.pass());
-    try std.testing.expectEqual(@as(usize, 1), result.violations.len);
-    try std.testing.expectEqualStrings("boundary", result.violations[0].rule);
 }

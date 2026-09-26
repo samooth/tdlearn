@@ -121,6 +121,37 @@ pub const CallGraphBuilder = struct {
         func: core.types.FuncInfo,
     };
 
+    /// Per-caller budget of call targets. `max_call_targets == 0` means
+    /// unlimited, and the budget is consumed by every call site — resolved or
+    /// not — so a function cannot exceed the cap by calling names that do not
+    /// resolve.
+    const CallBudget = struct {
+        counts: std.StringHashMap(u32),
+        limit: u32,
+        enabled: bool,
+
+        fn init(allocator: Allocator, limit: u32) CallBudget {
+            return .{
+                .counts = std.StringHashMap(u32).init(allocator),
+                .limit = limit,
+                .enabled = limit > 0,
+            };
+        }
+
+        fn deinit(self: *CallBudget) void {
+            self.counts.deinit();
+        }
+
+        /// Returns false when this caller has already used its budget.
+        fn consume(self: *CallBudget, caller: []const u8) !bool {
+            if (!self.enabled) return true;
+            const count = self.counts.get(caller) orelse 0;
+            if (count >= self.limit) return false;
+            try self.counts.put(caller, count + 1);
+            return true;
+        }
+    };
+
     fn appendResolvedEdges(
         allocator: Allocator,
         file_funcs: []const core.types.FileFuncs,
@@ -134,62 +165,74 @@ pub const CallGraphBuilder = struct {
             const sites = try extractCallSites(allocator, ff);
             defer allocator.free(sites);
             const imported = imports_by_file.get(ff.file);
-            var target_counts = std.StringHashMap(u32).init(allocator);
-            defer target_counts.deinit();
+            var budget = CallBudget.init(allocator, max_call_targets);
+            defer budget.deinit();
             for (sites) |site| {
                 const caller = enclosingFunc(ff.funcs, site.line) orelse continue;
-                if (max_call_targets > 0) {
-                    const count = target_counts.get(caller.name) orelse 0;
-                    if (count >= max_call_targets) continue;
-                    try target_counts.put(caller.name, count + 1);
-                }
+                if (!try budget.consume(caller.name)) continue;
                 if (hasLocalFunc(ff.funcs, site.callee)) continue;
                 const candidates = fn_index.get(site.callee) orelse continue;
-                if (imported) |imp| {
-                    var matched: ?FnEntry = null;
-                    var public_matched: ?FnEntry = null;
-                    for (candidates.items) |cand| {
-                        var is_imported = false;
-                        for (imp.items) |imp_file| {
-                            if (std.mem.eql(u8, imp_file, cand.file)) {
-                                is_imported = true;
-                                break;
-                            }
-                        }
-                        if (!is_imported) continue;
-                        matched = cand;
-                        if (cand.func.is_public and public_matched == null) public_matched = cand;
-                    }
-                    if (public_matched orelse matched) |target| {
-                        try appendEdge(allocator, edges, edge_set, .{
-                            .from_file = ff.file,
-                            .from_func = caller.name,
-                            .to_file = target.file,
-                            .to_func = site.callee,
-                        });
-                        continue;
-                    }
-                }
-                if (site.qualified) continue;
-                var public_count: usize = 0;
-                var public_target: ?FnEntry = null;
-                for (candidates.items) |cand| {
-                    if (cand.func.is_public) {
-                        public_count += 1;
-                        if (public_target == null) public_target = cand;
-                    }
-                }
-                if (public_count == 1) {
-                    const target = public_target.?;
-                    try appendEdge(allocator, edges, edge_set, .{
-                        .from_file = ff.file,
-                        .from_func = caller.name,
-                        .to_file = target.file,
-                        .to_func = site.callee,
-                    });
-                }
+                const target = resolveTarget(candidates, imported, site.qualified) orelse continue;
+                try appendEdge(allocator, edges, edge_set, .{
+                    .from_file = ff.file,
+                    .from_func = caller.name,
+                    .to_file = target.file,
+                    .to_func = site.callee,
+                });
             }
         }
+    }
+
+    /// Resolution policy, in order of decreasing confidence:
+    ///   1. a candidate in a file this module explicitly imports,
+    ///   2. nothing, for a qualified call like `obj.method()` — the receiver
+    ///      would have to be resolved to know where it points,
+    ///   3. a name that maps to exactly one public function in the whole index.
+    /// Anything less certain stays unresolved rather than becoming an invented
+    /// edge.
+    fn resolveTarget(
+        candidates: *const FnEntryList,
+        imported: ?*const std.ArrayList([]const u8),
+        qualified: bool,
+    ) ?FnEntry {
+        if (imported) |files| {
+            if (pickImported(candidates, files.items)) |target| return target;
+        }
+        if (qualified) return null;
+        return pickSolePublic(candidates);
+    }
+
+    /// A public imported candidate wins; otherwise the last imported one does.
+    fn pickImported(candidates: *const FnEntryList, files: []const []const u8) ?FnEntry {
+        var matched: ?FnEntry = null;
+        var public_matched: ?FnEntry = null;
+        for (candidates.items) |cand| {
+            if (!isImportedFrom(files, cand.file)) continue;
+            matched = cand;
+            if (cand.func.is_public and public_matched == null) public_matched = cand;
+        }
+        return public_matched orelse matched;
+    }
+
+    fn isImportedFrom(files: []const []const u8, file: []const u8) bool {
+        for (files) |imported_file| {
+            if (std.mem.eql(u8, imported_file, file)) return true;
+        }
+        return false;
+    }
+
+    /// Only an unambiguous name resolves: two public functions with the same
+    /// name are ambiguous, not a target.
+    fn pickSolePublic(candidates: *const FnEntryList) ?FnEntry {
+        var public_count: usize = 0;
+        var public_target: ?FnEntry = null;
+        for (candidates.items) |cand| {
+            if (!cand.func.is_public) continue;
+            public_count += 1;
+            if (public_target == null) public_target = cand;
+        }
+        if (public_count != 1) return null;
+        return public_target;
     }
 
     fn appendEdge(
@@ -233,82 +276,100 @@ const CallSite = struct {
     qualified: bool = false,
 };
 
-/// Extract call sites: identifiers followed by '(' that are not
-/// keywords, not this file's own declaration lines, and not
-/// control-flow constructs.
+/// Extract call sites: identifiers followed by '(' that are not keywords, not
+/// this file's own declaration lines, and not inside a comment or a string.
 /// Both plain `fn(` and qualified `mod.fn(` / `obj.fn(` calls are captured;
-/// ambiguity between object dispatch and module access is resolved later
-/// by the edge builder (import + unique-definition rules).
+/// ambiguity between object dispatch and module access is resolved later by the
+/// edge builder (import + unique-definition rules).
+///
+/// Every line is masked with the shared lexer before it is scanned, so a `(`
+/// inside a comment or a literal cannot be read as a call. The identifier is
+/// then sliced out of the *original* line: the mask is byte-for-byte the same
+/// length as its input (pinned by the "discard mode preserves length" test in
+/// `core/source_lexer.zig`), so both agree on offsets, and the returned name is
+/// a stable view of the file contents rather than of scratch space.
 pub fn extractCallSites(allocator: Allocator, ff: core.types.FileFuncs) ![]CallSite {
     var sites = std.ArrayList(CallSite).empty;
     errdefer sites.deinit(allocator);
 
+    const language = lexerLanguage(ff.lang);
+    // The lexer state is threaded across lines on purpose: a block comment or
+    // a multi-line literal that starts on one line must keep masking the
+    // following lines, which a per-line scan cannot know.
+    var state = core.source_lexer.State{};
+    var masked = std.ArrayList(u8).empty;
+    defer masked.deinit(allocator);
+
     var line_no: u32 = 0;
     var offset: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, ff.contents, offset, '\n')) |nl| {
+    while (offset < ff.contents.len) {
+        const nl = std.mem.indexOfScalarPos(u8, ff.contents, offset, '\n') orelse ff.contents.len;
         line_no += 1;
         const line = ff.contents[offset..nl];
+        masked.clearRetainingCapacity();
+        try core.source_lexer.sanitizeLine(allocator, &masked, line, language, .discard_literals, &state);
+        std.debug.assert(masked.items.len == line.len);
+        try scanLine(allocator, &sites, ff.funcs, masked.items, line, line_no);
         offset = nl + 1;
-        try scanLine(allocator, &sites, ff.funcs, line, line_no);
-    }
-    if (offset < ff.contents.len) {
-        line_no += 1;
-        try scanLine(allocator, &sites, ff.funcs, ff.contents[offset..], line_no);
     }
 
     return try sites.toOwnedSlice(allocator);
 }
 
-fn scanLine(allocator: Allocator, sites: *std.ArrayList(CallSite), funcs: []const core.types.FuncInfo, line: []const u8, line_no: u32) !void {
+fn lexerLanguage(lang: []const u8) core.source_lexer.Language {
+    if (std.mem.eql(u8, lang, "zig")) return .zig;
+    if (std.mem.eql(u8, lang, "rust")) return .rust;
+    if (std.mem.eql(u8, lang, "python")) return .python;
+    if (std.mem.eql(u8, lang, "javascript") or std.mem.eql(u8, lang, "typescript")) return .javascript;
+    if (std.mem.eql(u8, lang, "go")) return .go;
+    if (std.mem.eql(u8, lang, "c") or std.mem.eql(u8, lang, "cpp")) return .c;
+    return .other;
+}
+
+/// Scan one masked line for calls, taking the callee from `line` (the original
+/// text) at the offsets `masked` reported.
+fn scanLine(
+    allocator: Allocator,
+    sites: *std.ArrayList(CallSite),
+    funcs: []const core.types.FuncInfo,
+    masked: []const u8,
+    line: []const u8,
+    line_no: u32,
+) !void {
     // Skip declaration lines — the declared name isn't a call
     for (funcs) |f| {
         if (f.start_line == line_no) return;
     }
 
-    var in_string: u8 = 0;
-    var prev: u8 = 0;
     var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (in_string != 0) {
-            if (c == in_string and prev != '\\') in_string = 0;
-            prev = c;
-            continue;
-        }
-        if (c == '"' or c == '\'') {
-            in_string = c;
-            prev = c;
-            continue;
-        }
-        if (c == '(') {
-            // Scan backwards for the callee identifier
-            var end = i;
-            while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) end -= 1;
-            if (end == 0) {
-                prev = c;
-                continue;
-            }
-            var start = end;
-            while (start > 0 and isIdentChar(line[start - 1])) start -= 1;
-            if (start < end) {
-                const name = line[start..end];
-                // The char before the identifier decides the flavor:
-                //   `.` or `:` → qualified call (mod.func / obj.method)
-                //   anything else → plain call
-                const qualified = start > 0 and (line[start - 1] == '.' or line[start - 1] == ':');
-                if (!qualified and isKeyword(name)) {
-                    prev = c;
-                    continue;
-                }
-                try sites.append(allocator, .{
-                    .line = line_no,
-                    .callee = name,
-                    .qualified = qualified,
-                });
-            }
-        }
-        prev = c;
+    while (i < masked.len) : (i += 1) {
+        if (masked[i] != '(') continue;
+        const range = calleeRange(masked, i) orelse continue;
+        // The character before the identifier decides the flavor:
+        //   `.` or `:` → qualified call (mod.func / obj.method)
+        //   anything else → plain call
+        const qualified = range.start > 0 and (masked[range.start - 1] == '.' or masked[range.start - 1] == ':');
+        if (!qualified and isKeyword(line[range.start..range.end])) continue;
+        try sites.append(allocator, .{
+            .line = line_no,
+            .callee = line[range.start..range.end],
+            .qualified = qualified,
+        });
     }
+}
+
+/// Byte range of the identifier immediately before the `(` at `paren`, or null
+/// when the call has no callee (a bare `(`, a grouping paren, or a keyword).
+const CalleeRange = struct { start: usize, end: usize };
+
+fn calleeRange(code: []const u8, paren: usize) ?CalleeRange {
+    var end = paren;
+    while (end > 0 and (code[end - 1] == ' ' or code[end - 1] == '\t')) end -= 1;
+    if (end == 0) return null;
+    var start = end;
+    while (start > 0 and isIdentChar(code[start - 1])) start -= 1;
+    if (start == end) return null;
+    return .{ .start = start, .end = end };
 }
 
 fn isKeyword(name: []const u8) bool {
@@ -371,6 +432,7 @@ test "call sites extracted per line, decl lines skipped" {
         .funcs = &funcs,
     };
     const sites = try extractCallSites(arena.allocator(), ff);
+    defer arena.allocator().free(sites);
     // helper( and other( on line 2; decl lines 1 and 5 skipped
     try std.testing.expectEqual(@as(usize, 2), sites.len);
     try std.testing.expectEqualStrings("helper", sites[0].callee);
@@ -396,6 +458,7 @@ test "keywords skipped, methods captured as qualified" {
         .funcs = &funcs,
     };
     const sites = try extractCallSites(arena.allocator(), ff);
+    defer arena.allocator().free(sites);
     // `if` is keyword (skipped); cond, method, plain are calls.
     // `method` is qualified — resolution filters it later if ambiguous.
     try std.testing.expectEqual(@as(usize, 3), sites.len);
@@ -466,6 +529,7 @@ test "call strings ignored" {
         .funcs = &funcs,
     };
     const sites = try extractCallSites(arena.allocator(), ff);
+    defer arena.allocator().free(sites);
     try std.testing.expectEqual(@as(usize, 1), sites.len);
     try std.testing.expectEqualStrings("real", sites[0].callee);
 }
@@ -596,4 +660,63 @@ test "dedup identical call edges" {
     };
     const edges = try CallGraphBuilder.buildCallEdges(arena.allocator(), &.{ a, b }, &imports);
     try std.testing.expectEqual(@as(usize, 1), edges.len);
+}
+
+test "calls inside comments and multi-line literals are ignored" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // The scanner used to track strings by hand and ignore comments entirely,
+    // so every call below used to be reported as a real call.
+    const contents =
+        \\// notACall();
+        \\pub fn f() void {
+        \\    /* alsoNotACall();
+        \\       stillNotACall(); */
+        \\    const text =
+        \\        \\rawNotACall();
+        \\    ;
+        \\    real();
+        \\}
+    ;
+    const funcs = [_]core.types.FuncInfo{makeFunc("f", 2, 9, true)};
+    const ff = core.types.FileFuncs{
+        .file = "src/a.zig",
+        .contents = contents,
+        .funcs = &funcs,
+        .lang = "zig",
+    };
+    const sites = try extractCallSites(arena.allocator(), ff);
+    defer arena.allocator().free(sites);
+    try std.testing.expectEqual(@as(usize, 1), sites.len);
+    try std.testing.expectEqualStrings("real", sites[0].callee);
+    try std.testing.expectEqual(@as(u32, 8), sites[0].line);
+}
+
+test "callee names point into the file contents, not into scratch space" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // The masked line is scratch space reused per line, so a callee sliced out
+    // of the mask would be overwritten by the following line. Callers rely on
+    // these names outliving the scan (the call graph keeps them in edges).
+    const contents = "pub fn f() void {\n    alpha();\n    beta();\n}\n";
+    const funcs = [_]core.types.FuncInfo{makeFunc("f", 1, 4, true)};
+    const ff = core.types.FileFuncs{
+        .file = "src/a.zig",
+        .contents = contents,
+        .funcs = &funcs,
+        .lang = "zig",
+    };
+    const sites = try extractCallSites(arena.allocator(), ff);
+    defer arena.allocator().free(sites);
+    try std.testing.expectEqual(@as(usize, 2), sites.len);
+    try std.testing.expectEqualStrings("alpha", sites[0].callee);
+    try std.testing.expectEqualStrings("beta", sites[1].callee);
+    // Both names must be views inside the contents buffer itself.
+    const base = @intFromPtr(contents.ptr);
+    const limit = base + contents.len;
+    for (sites) |site| {
+        const start = @intFromPtr(site.callee.ptr);
+        try std.testing.expect(start >= base);
+        try std.testing.expect(start + site.callee.len <= limit);
+    }
 }

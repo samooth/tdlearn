@@ -24,6 +24,13 @@ pub const State = struct {
     template: bool = false,
 };
 
+/// Mask (or preserve) one source line.
+///
+/// The loop handles plain code bytes; everything that is not code — comments,
+/// string and template literals, and the line-continuation forms that need
+/// language knowledge — is handled by `consumeNonCode`, which consumes at least
+/// one byte when it returns true. Splitting it that way keeps this function a
+/// plain driver and lets the per-language rules be read in one place.
 pub fn sanitizeLine(
     allocator: Allocator,
     output: *ArrayList,
@@ -35,64 +42,95 @@ pub fn sanitizeLine(
     var index: usize = 0;
     while (index < raw.len) {
         if (try consumeLiteralState(allocator, output, raw, &index, mode, state)) continue;
-
-        if (index == 0 and language == .zig and isZigMultilineStringLine(raw)) {
-            // A Zig multiline string line begins with `\\` after indentation and
-            // is literal content until the newline; the whole line is masked so
-            // braces and quotes inside it never affect the caller.
-            try appendLiteral(allocator, output, raw, mode);
-            break;
-        }
-
-        if (language == .python and raw[index] == '#') {
-            try appendComment(allocator, output, raw.len - index, mode);
-            break;
-        }
-        if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '/') {
-            try appendComment(allocator, output, raw.len - index, mode);
-            break;
-        }
-        if (raw[index] == '/' and index + 1 < raw.len and raw[index + 1] == '*') {
-            try appendComment(allocator, output, 2, mode);
-            state.block_comment = true;
-            index += 2;
-            continue;
-        }
-        if (language == .python and (raw[index] == '"' or raw[index] == '\'') and
-            hasTripleQuote(raw, index, raw[index]))
-        {
-            try appendLiteral(allocator, output, raw[index .. index + 3], mode);
-            state.triple_quote = raw[index];
-            index += 3;
-            continue;
-        }
-        if (language == .javascript and raw[index] == '`') {
-            try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-            state.template = true;
-            index += 1;
-            continue;
-        }
-        if (raw[index] == '"' or raw[index] == '\'') {
-            const quote = raw[index];
-            try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-            index += 1;
-            while (index < raw.len) {
-                if (raw[index] == '\\' and index + 1 < raw.len) {
-                    try appendLiteral(allocator, output, raw[index .. index + 2], mode);
-                    index += 2;
-                } else if (raw[index] == quote) {
-                    try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-                    index += 1;
-                    break;
-                } else {
-                    try appendLiteral(allocator, output, raw[index .. index + 1], mode);
-                    index += 1;
-                }
-            }
-            continue;
-        }
+        if (try consumeNonCode(allocator, output, raw, &index, language, mode, state)) continue;
         try appendCode(allocator, output, raw[index], mode);
         index += 1;
+    }
+}
+
+/// Handle a non-code construct that starts at `index`. Returns true when it
+/// consumed the construct, false when this byte is ordinary code and the
+/// caller should emit it.
+fn consumeNonCode(
+    allocator: Allocator,
+    output: *ArrayList,
+    raw: []const u8,
+    index: *usize,
+    language: Language,
+    mode: Mode,
+    state: *State,
+) !bool {
+    if (index.* == 0 and language == .zig and isZigMultilineStringLine(raw)) {
+        // A Zig multiline string line begins with `\` after indentation and is
+        // literal content until the newline; the whole line is masked so braces
+        // and quotes inside it never affect the caller.
+        try appendLiteral(allocator, output, raw, mode);
+        index.* = raw.len;
+        return true;
+    }
+
+    const c = raw[index.*];
+    if (c == '#' and language == .python) {
+        try appendComment(allocator, output, raw.len - index.*, mode);
+        index.* = raw.len;
+        return true;
+    }
+    if (c == '/' and index.* + 1 < raw.len) {
+        const next = raw[index.* + 1];
+        if (next == '/') {
+            try appendComment(allocator, output, raw.len - index.*, mode);
+            index.* = raw.len;
+            return true;
+        }
+        if (next == '*') {
+            try appendComment(allocator, output, 2, mode);
+            state.block_comment = true;
+            index.* += 2;
+            return true;
+        }
+    }
+    if (language == .python and (c == '"' or c == '\'') and hasTripleQuote(raw, index.*, c)) {
+        try appendLiteral(allocator, output, raw[index.* .. index.* + 3], mode);
+        state.triple_quote = c;
+        index.* += 3;
+        return true;
+    }
+    if (language == .javascript and c == '`') {
+        try appendLiteral(allocator, output, raw[index.* .. index.* + 1], mode);
+        state.template = true;
+        index.* += 1;
+        return true;
+    }
+    if (c == '"' or c == '\'') {
+        try consumeQuoted(allocator, output, raw, index, c, mode);
+        return true;
+    }
+    return false;
+}
+
+/// Consume a single-line quoted literal, honouring backslash escapes, up to and
+/// including the closing quote. An unterminated literal runs to the end of the
+/// line, which is the only information a line-based scanner has.
+fn consumeQuoted(
+    allocator: Allocator,
+    output: *ArrayList,
+    raw: []const u8,
+    index: *usize,
+    quote: u8,
+    mode: Mode,
+) !void {
+    try appendLiteral(allocator, output, raw[index.* .. index.* + 1], mode);
+    index.* += 1;
+    while (index.* < raw.len) {
+        if (raw[index.*] == '\\' and index.* + 1 < raw.len) {
+            try appendLiteral(allocator, output, raw[index.* .. index.* + 2], mode);
+            index.* += 2;
+            continue;
+        }
+        const closes = raw[index.*] == quote;
+        try appendLiteral(allocator, output, raw[index.* .. index.* + 1], mode);
+        index.* += 1;
+        if (closes) return;
     }
 }
 
@@ -213,4 +251,29 @@ test "lexer masks zig multiline string lines entirely" {
     try sanitizeLine(allocator, &output, "    \\\\has { brace and \\\"quote", .zig, .discard_literals, &state);
     try std.testing.expect(std.mem.indexOfScalar(u8, output.items, '{') == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, output.items, '"') == null);
+}
+
+test "discard mode preserves length for every language" {
+    const allocator = std.testing.allocator;
+    // Callers rely on this: the import scanner and the call scanner slice
+    // identifiers out of the *original* line using offsets found in the mask,
+    // so a mask of a different length would silently misalign every offset.
+    const lines = [_][]const u8{
+        "const s = \"text\"; // trailing",
+        "    fn f() void { _ = 1; }",
+        "    /* block */ _ = 2;",
+        "    const raw = \\multi\n",
+        "text = '''triple",
+        "const t = `template ${x}`;",
+    };
+    const languages = [_]Language{ .zig, .rust, .python, .javascript, .go, .c, .other };
+    for (lines) |line| {
+        for (languages) |language| {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(allocator);
+            var state = State{};
+            try sanitizeLine(allocator, &out, line, language, .discard_literals, &state);
+            try std.testing.expectEqual(line.len, out.items.len);
+        }
+    }
 }

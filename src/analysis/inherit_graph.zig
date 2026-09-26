@@ -129,36 +129,43 @@ pub const InheritGraphBuilder = struct {
                 const bases = cls.bases orelse continue;
                 for (bases) |base| {
                     const candidates = class_index.get(base) orelse continue;
-                    for (candidates.items) |cand_file| {
-                        if (std.mem.eql(u8, cand_file, fc.file)) continue;
-                        if (imported) |imp| {
-                            for (imp.items) |imp_file| {
-                                if (std.mem.eql(u8, imp_file, cand_file)) {
-                                    try appendEdge(allocator, edges, edge_set, .{
-                                        .child_file = fc.file,
-                                        .child_class = cls.name,
-                                        .parent_file = cand_file,
-                                        .parent_class = base,
-                                    });
-                                    break;
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                    if (candidates.items.len == 1) {
-                        const cand_file = candidates.items[0];
-                        if (std.mem.eql(u8, cand_file, fc.file)) continue;
-                        try appendEdge(allocator, edges, edge_set, .{
-                            .child_file = fc.file,
-                            .child_class = cls.name,
-                            .parent_file = cand_file,
-                            .parent_class = base,
-                        });
-                    }
+                    const parent_file = resolveBaseFile(candidates, imported, fc.file) orelse continue;
+                    try appendEdge(allocator, edges, edge_set, .{
+                        .child_file = fc.file,
+                        .child_class = cls.name,
+                        .parent_file = parent_file,
+                        .parent_class = base,
+                    });
                 }
             }
         }
+    }
+
+    /// Which file, if any, defines `base` for a class in `child_file`.
+    ///
+    /// A base declared in a file the child imports wins. When the child does
+    /// import files, that list is decisive: a base defined only outside the
+    /// imports stays unresolved instead of being guessed from the project. With
+    /// no imports to go by, the name has to be unique in the whole project, and
+    /// a same-file definition never counts as a parent.
+    fn resolveBaseFile(
+        candidates: *const std.ArrayList([]const u8),
+        imported: ?*const std.ArrayList([]const u8),
+        child_file: []const u8,
+    ) ?[]const u8 {
+        if (imported) |files| {
+            for (candidates.items) |cand_file| {
+                if (std.mem.eql(u8, cand_file, child_file)) continue;
+                for (files.items) |imp_file| {
+                    if (std.mem.eql(u8, imp_file, cand_file)) return cand_file;
+                }
+            }
+            return null;
+        }
+        if (candidates.items.len != 1) return null;
+        const only = candidates.items[0];
+        if (std.mem.eql(u8, only, child_file)) return null;
+        return only;
     }
 
     fn appendEdge(

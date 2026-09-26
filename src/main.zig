@@ -1,12 +1,19 @@
+//! `tdlearn` — the command line entry point.
+//!
+//! Everything below `main` is `pub` because `main_test.zig` drives the pipeline
+//! and the report shapes from the outside instead of through a process
+//! boundary. This file is the executable root and nothing imports it except its
+//! own tests, so `pub` here means "testable", not "public API of a library".
+
 const std = @import("std");
 const core = @import("core");
 const metrics = @import("metrics");
 const analysis = @import("analysis");
 
-const json_schema_version: u32 = 2;
-const tool_version = "0.1.0";
+pub const json_schema_version: u32 = 2;
+pub const tool_version = "0.1.0";
 
-const CliOptions = struct {
+pub const CliOptions = struct {
     command: []const u8,
     path: []const u8 = ".",
     save: bool = false,
@@ -76,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     result catch |err| exitForError(init.io, init.gpa, err, options.json);
 }
 
-fn hasJsonFlag(args: []const []const u8) bool {
+pub fn hasJsonFlag(args: []const []const u8) bool {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--")) return false;
         if (std.mem.eql(u8, arg, "--json")) return true;
@@ -84,7 +91,7 @@ fn hasJsonFlag(args: []const []const u8) bool {
     return false;
 }
 
-fn parseOptions(command: []const u8, args: []const []const u8) !CliOptions {
+pub fn parseOptions(command: []const u8, args: []const []const u8) !CliOptions {
     if (!std.mem.eql(u8, command, "scan") and
         !std.mem.eql(u8, command, "check") and
         !std.mem.eql(u8, command, "gate"))
@@ -129,7 +136,7 @@ fn parseOptions(command: []const u8, args: []const []const u8) !CliOptions {
     return options;
 }
 
-fn printUsage(io: std.Io) !void {
+pub fn printUsage(io: std.Io) !void {
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     try writer.interface.writeAll(
@@ -146,14 +153,14 @@ fn printUsage(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-fn printVersion(io: std.Io) !void {
+pub fn printVersion(io: std.Io) !void {
     var buffer: [128]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     try writer.interface.writeAll("tdlearn 0.1.0\n");
     try writer.interface.flush();
 }
 
-fn exitForError(io: std.Io, allocator: std.mem.Allocator, err: anyerror, json_flag: bool) noreturn {
+pub fn exitForError(io: std.Io, allocator: std.mem.Allocator, err: anyerror, json_flag: bool) noreturn {
     switch (err) {
         error.CheckFailed, error.GateFailed, error.NoRulesFile, error.NoBaseline => {},
         else => {
@@ -168,13 +175,13 @@ fn exitForError(io: std.Io, allocator: std.mem.Allocator, err: anyerror, json_fl
     std.process.exit(2);
 }
 
-fn validateRoot(io: std.Io, path: []const u8) !void {
+pub fn validateRoot(io: std.Io, path: []const u8) !void {
     if (path.len == 0) return error.InvalidPath;
     var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     dir.close(io);
 }
 
-fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+pub fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const stat = try file.stat(io);
@@ -186,7 +193,7 @@ fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const
     return buf[0..bytes_read];
 }
 
-fn readOptionalFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?[]const u8 {
+pub fn readOptionalFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?[]const u8 {
     return readFile(allocator, io, path) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
@@ -224,14 +231,14 @@ const JsonErrorDetails = struct {
     message: []const u8,
 };
 
-const JsonError = struct {
+pub const JsonError = struct {
     schema_version: u32,
     tool_version: []const u8,
     ok: bool,
     error_info: JsonErrorDetails,
 };
 
-const JsonHotspot = struct {
+pub const JsonHotspot = struct {
     file: []const u8,
     name: []const u8,
     lines: u32,
@@ -240,7 +247,7 @@ const JsonHotspot = struct {
     score: u64,
 };
 
-const JsonScan = struct {
+pub const JsonScan = struct {
     schema_version: u32,
     tool_version: []const u8,
     ok: bool,
@@ -262,7 +269,7 @@ const JsonScan = struct {
     skipped_files: []const analysis.walker.SkippedFile,
 };
 
-const JsonCheck = struct {
+pub const JsonCheck = struct {
     schema_version: u32,
     tool_version: []const u8,
     ok: bool,
@@ -274,15 +281,19 @@ const JsonCheck = struct {
     violations: []const JsonViolation,
 };
 
-const JsonViolation = struct {
+pub const JsonViolation = struct {
     rule: []const u8,
     severity: []const u8,
     message: []const u8,
     from: ?[]const u8,
     to: ?[]const u8,
+    /// Function name for per-function rules, null for aggregate/edge rules.
+    subject: ?[]const u8,
+    /// 1-based line of `subject`, for CI annotations; null when unknown.
+    line: ?u32,
 };
 
-const JsonGate = struct {
+pub const JsonGate = struct {
     schema_version: u32,
     tool_version: []const u8,
     ok: bool,
@@ -295,7 +306,7 @@ const JsonGate = struct {
     violations: []const []const u8,
 };
 
-const JsonGateSave = struct {
+pub const JsonGateSave = struct {
     schema_version: u32,
     tool_version: []const u8,
     ok: bool,
@@ -306,12 +317,12 @@ const JsonGateSave = struct {
     metrics: JsonGateMetrics,
 };
 
-fn scoreInt(score: f64) u32 {
+pub fn scoreInt(score: f64) u32 {
     return @intFromFloat(@max(0.0, @min(1.0, score)) * 10000.0);
 }
 
 /// Write JSON payload to stdout (for tooling consumption).
-fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !void {
+pub fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !void {
     const json = try std.json.Stringify.valueAlloc(allocator, payload, .{ .whitespace = .indent_2 });
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
@@ -320,7 +331,7 @@ fn printJsonStdout(io: std.Io, allocator: std.mem.Allocator, payload: anytype) !
     try stdout_writer.interface.flush();
 }
 
-fn jsonUnits() JsonUnits {
+pub fn jsonUnits() JsonUnits {
     return .{
         .quality_signal = "0-10000",
         .line_counts = "lines",
@@ -328,7 +339,7 @@ fn jsonUnits() JsonUnits {
     };
 }
 
-fn gateMetricsFromReport(report: metrics.HealthReport) JsonGateMetrics {
+pub fn gateMetricsFromReport(report: metrics.HealthReport) JsonGateMetrics {
     return .{
         .quality_signal = report.quality_signal_int,
         .cycle_count = report.root_cause_raw.cycle_count,
@@ -339,7 +350,7 @@ fn gateMetricsFromReport(report: metrics.HealthReport) JsonGateMetrics {
     };
 }
 
-fn gateMetricsFromBaseline(baseline: core.baseline.Baseline) JsonGateMetrics {
+pub fn gateMetricsFromBaseline(baseline: core.baseline.Baseline) JsonGateMetrics {
     return .{
         .quality_signal = @intFromFloat(@max(0.0, @min(1.0, baseline.quality_signal)) * 10000.0),
         .cycle_count = baseline.cycle_count,
@@ -350,7 +361,7 @@ fn gateMetricsFromBaseline(baseline: core.baseline.Baseline) JsonGateMetrics {
     };
 }
 
-fn printJsonError(io: std.Io, allocator: std.mem.Allocator, err: anyerror) !void {
+pub fn printJsonError(io: std.Io, allocator: std.mem.Allocator, err: anyerror) !void {
     const code = @errorName(err);
     const payload = JsonError{
         .schema_version = json_schema_version,
@@ -365,7 +376,7 @@ fn printJsonError(io: std.Io, allocator: std.mem.Allocator, err: anyerror) !void
     try printJsonStdout(io, allocator, payload);
 }
 
-fn errorCategory(code: []const u8) []const u8 {
+pub fn errorCategory(code: []const u8) []const u8 {
     const usage_errors = [_][]const u8{ "UnknownCommand", "UnknownFlag", "InvalidFlag", "DuplicateFlag", "ExtraArgument", "InvalidPath" };
     for (usage_errors) |candidate| {
         if (std.mem.eql(u8, code, candidate)) return "usage";
@@ -379,7 +390,7 @@ fn errorCategory(code: []const u8) []const u8 {
 }
 
 /// Full analysis result shared by scan/check/gate commands.
-const Analysis = struct {
+pub const Analysis = struct {
     report: metrics.HealthReport,
     import_edges: []const core.types.ImportEdge,
     call_edges: []const core.types.CallEdge,
@@ -390,15 +401,19 @@ const Analysis = struct {
     depth_path: []const []const u8,
     hotspots: []const JsonHotspot,
     skipped_files: []const analysis.walker.SkippedFile,
+    /// Per-function complexity, collected while extracting so `check` can
+    /// enforce the per-function ceilings without keeping the heavier
+    /// `FileFuncs` alive after the report is built.
+    functions: []const core.rules.FunctionComplexity = &.{},
 };
 
-const GraphBuilds = struct {
+pub const GraphBuilds = struct {
     call_edges: []const core.types.CallEdge,
     inherit_edges: []const core.types.InheritEdge,
     report: metrics.HealthReport,
 };
 
-fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8) ![]const []const u8 {
+pub fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8) ![]const []const u8 {
     var source_paths = std.ArrayList([]const u8).empty;
     errdefer source_paths.deinit(allocator);
     for (all_paths) |file_path| {
@@ -409,7 +424,7 @@ fn filterSourcePaths(allocator: std.mem.Allocator, all_paths: []const []const u8
     return try source_paths.toOwnedSlice(allocator);
 }
 
-fn loadSourceContents(
+pub fn loadSourceContents(
     arena: std.mem.Allocator,
     io: std.Io,
     path: []const u8,
@@ -442,7 +457,7 @@ fn loadSourceContents(
     }
 }
 
-fn collectSourceNodes(
+pub fn collectSourceNodes(
     arena: std.mem.Allocator,
     files: []const core.types.FileNode,
     file_paths: []const []const u8,
@@ -454,20 +469,21 @@ fn collectSourceNodes(
     }
 }
 
-fn extractFunctionData(
+pub fn extractFunctionData(
     arena: std.mem.Allocator,
     files: []const core.types.FileNode,
     file_paths: []const []const u8,
     source_contents: []const []const u8,
     file_funcs: *std.ArrayList(metrics.dead_code.FileFuncs),
     file_classes: *std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses),
+    functions: *std.ArrayList(core.rules.FunctionComplexity),
     max_file_lines: *u32,
     max_fn_lines: *u32,
 ) !void {
     for (file_paths, source_contents) |fpath, contents| {
         const lang = analysis.graph_builder.GraphBuilder.detectLangForFile(fpath);
         const funcs = try analysis.functions.FunctionExtractor.extract(arena, contents, lang);
-        try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs });
+        try file_funcs.append(arena, .{ .file = fpath, .contents = contents, .funcs = funcs, .lang = lang });
         const classes = try analysis.classes.ClassExtractor.extract(arena, contents, lang);
         if (classes.len > 0) try file_classes.append(arena, .{ .file = fpath, .classes = classes });
         if (findFileNode(files, fpath)) |node| {
@@ -475,11 +491,21 @@ fn extractFunctionData(
         }
         for (funcs) |func| {
             if (func.line_count > max_fn_lines.*) max_fn_lines.* = func.line_count;
+            // A function with no complexity data scores 0, which never violates
+            // a ceiling; the ceilings are about measured complexity, so an
+            // unmeasured function must not be reported as if it were complex.
+            try functions.append(arena, .{
+                .file = fpath,
+                .name = func.name,
+                .line = func.start_line,
+                .cyclomatic = func.cyclomatic_complexity orelse 0,
+                .cognitive = func.cognitive_complexity orelse 0,
+            });
         }
     }
 }
 
-fn copySkippedFiles(
+pub fn copySkippedFiles(
     arena: std.mem.Allocator,
     source: []const analysis.walker.SkippedFile,
     destination: *std.ArrayList(analysis.walker.SkippedFile),
@@ -492,7 +518,7 @@ fn copySkippedFiles(
     }
 }
 
-fn buildGraphs(
+pub fn buildGraphs(
     arena: std.mem.Allocator,
     settings: core.settings.Settings,
     source_files: []const core.types.FileNode,
@@ -515,29 +541,49 @@ fn buildGraphs(
     return .{ .call_edges = call_edges, .inherit_edges = inherit_edges, .report = report };
 }
 
-/// Run walker + graph builder + function extraction + health metrics.
-/// All allocations come from `arena` (caller-owned).
-fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
-    try validateRoot(io, path);
-    var settings = core.settings.Settings{};
-    settings.sanitize();
-    var walker = try analysis.walker.Walker.initWithSettings(arena, io, path, settings);
-    defer walker.deinit();
+/// Everything read from disk before any graph exists. Produced by
+/// `scanProject` so the pipeline reads as: read the project, build the graphs,
+/// finalize.
+///
+/// The struct owns nothing: every field borrows from the caller's `arena`, and
+/// `files` is owned by the `Walker` that produced it. That is the same
+/// arena-scoped contract as the rest of the pipeline, so `scanProject` does not
+/// free the lists it fills — the arena reclaims them together, and freeing them
+/// here would leave the caller holding dangling slices.
+pub const ProjectScan = struct {
+    files: []const core.types.FileNode,
+    parsed_paths: []const []const u8,
+    source_contents: []const []const u8,
+    contents_by_path: std.StringHashMap([]const u8),
+    skipped_files: []const analysis.walker.SkippedFile,
+    file_funcs: []const metrics.dead_code.FileFuncs,
+    file_classes: []const analysis.inherit_graph.InheritGraphBuilder.FileClasses,
+    functions: []const core.rules.FunctionComplexity,
+    max_file_lines: u32,
+    max_fn_lines: u32,
+};
 
-    const files = try walker.walk();
-
+/// Walk the tree, read the source files, and extract functions and classes.
+/// Files that cannot be parsed are recorded in `skipped_files` instead of
+/// failing the run.
+fn scanProject(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    settings: core.settings.Settings,
+    files: []const core.types.FileNode,
+) !ProjectScan {
     const all_file_paths = try analysis.walker.Walker.flattenFiles(files, arena);
     const file_paths = try filterSourcePaths(arena, all_file_paths);
-    var parsed_paths = std.ArrayList([]const u8).empty;
-    defer parsed_paths.deinit(arena);
-    var skipped_files = std.ArrayList(analysis.walker.SkippedFile).empty;
-    defer skipped_files.deinit(arena);
-    try copySkippedFiles(arena, walker.skipped_files.items, &skipped_files);
 
+    var parsed_paths = std.ArrayList([]const u8).empty;
+    var skipped_files = std.ArrayList(analysis.walker.SkippedFile).empty;
     var source_contents = std.ArrayList([]const u8).empty;
-    defer source_contents.deinit(arena);
     var contents_by_path = std.StringHashMap([]const u8).init(arena);
-    defer contents_by_path.deinit();
+    var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
+    var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
+    var functions = std.ArrayList(core.rules.FunctionComplexity).empty;
+
     try loadSourceContents(
         arena,
         io,
@@ -549,20 +595,7 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         &contents_by_path,
         &skipped_files,
     );
-    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRootWithContents(
-        arena,
-        io,
-        path,
-        parsed_paths.items,
-        contents_by_path,
-    );
 
-    var source_files = std.ArrayList(core.types.FileNode).empty;
-    defer source_files.deinit(arena);
-    try collectSourceNodes(arena, files, parsed_paths.items, &source_files);
-
-    var file_funcs = std.ArrayList(metrics.dead_code.FileFuncs).empty;
-    var file_classes = std.ArrayList(analysis.inherit_graph.InheritGraphBuilder.FileClasses).empty;
     var max_file_lines: u32 = 0;
     var max_fn_lines: u32 = 0;
     try extractFunctionData(
@@ -572,17 +605,63 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         source_contents.items,
         &file_funcs,
         &file_classes,
+        &functions,
         &max_file_lines,
         &max_fn_lines,
     );
+
+    return .{
+        .files = files,
+        .parsed_paths = parsed_paths.items,
+        .source_contents = source_contents.items,
+        .contents_by_path = contents_by_path,
+        .skipped_files = skipped_files.items,
+        .file_funcs = file_funcs.items,
+        .file_classes = file_classes.items,
+        .functions = functions.items,
+        .max_file_lines = max_file_lines,
+        .max_fn_lines = max_fn_lines,
+    };
+}
+
+/// Run walker + graph builder + function extraction + health metrics.
+/// All allocations come from `arena` (caller-owned).
+pub fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis {
+    try validateRoot(io, path);
+    var settings = core.settings.Settings{};
+    settings.sanitize();
+    var walker = try analysis.walker.Walker.initWithSettings(arena, io, path, settings);
+    defer walker.deinit();
+
+    const files = try walker.walk();
+    var skipped_files = std.ArrayList(analysis.walker.SkippedFile).empty;
+    defer skipped_files.deinit(arena);
+    try copySkippedFiles(arena, walker.skipped_files.items, &skipped_files);
+
+    const project = try scanProject(arena, io, path, settings, files);
+    // Skips reported while walking come first, in walk order, then the ones the
+    // parser found; both are root-relative paths.
+    try skipped_files.appendSlice(arena, project.skipped_files);
+
+    const import_edges = try analysis.graph_builder.GraphBuilder.buildImportEdgesAtRootWithContents(
+        arena,
+        io,
+        path,
+        project.parsed_paths,
+        project.contents_by_path,
+    );
+
+    var source_files = std.ArrayList(core.types.FileNode).empty;
+    defer source_files.deinit(arena);
+    try collectSourceNodes(arena, files, project.parsed_paths, &source_files);
 
     const graphs = try buildGraphs(
         arena,
         settings,
         source_files.items,
         import_edges,
-        file_funcs.items,
-        file_classes.items,
+        project.file_funcs,
+        project.file_classes,
     );
     return finalizeAnalysis(
         arena,
@@ -590,15 +669,16 @@ fn runAnalysis(arena: std.mem.Allocator, io: std.Io, path: []const u8) !Analysis
         import_edges,
         graphs.call_edges,
         graphs.inherit_edges,
-        parsed_paths.items,
-        file_funcs.items,
-        max_file_lines,
-        max_fn_lines,
+        project.parsed_paths,
+        project.file_funcs,
+        project.functions,
+        project.max_file_lines,
+        project.max_fn_lines,
         skipped_files.items,
     );
 }
 
-fn finalizeAnalysis(
+pub fn finalizeAnalysis(
     arena: std.mem.Allocator,
     report: metrics.HealthReport,
     import_edges: []const core.types.ImportEdge,
@@ -606,6 +686,7 @@ fn finalizeAnalysis(
     inherit_edges: []const core.types.InheritEdge,
     file_paths: []const []const u8,
     file_funcs: []const metrics.dead_code.FileFuncs,
+    functions: []const core.rules.FunctionComplexity,
     max_file_lines: u32,
     max_fn_lines: u32,
     skipped_files: []const analysis.walker.SkippedFile,
@@ -620,11 +701,12 @@ fn finalizeAnalysis(
         .max_fn_lines = max_fn_lines,
         .depth_path = try buildDepthPath(arena, file_paths, import_edges),
         .skipped_files = try arena.dupe(analysis.walker.SkippedFile, skipped_files),
+        .functions = try arena.dupe(core.rules.FunctionComplexity, functions),
         .hotspots = try collectHotspots(arena, file_funcs),
     };
 }
 
-fn findFileNode(files: []const core.types.FileNode, path: []const u8) ?*const core.types.FileNode {
+pub fn findFileNode(files: []const core.types.FileNode, path: []const u8) ?*const core.types.FileNode {
     for (files) |*f| {
         if (!f.is_dir and std.mem.eql(u8, f.path, path)) return f;
         if (f.children) |children| {
@@ -636,13 +718,13 @@ fn findFileNode(files: []const core.types.FileNode, path: []const u8) ?*const co
 
 const max_hotspots = 10;
 
-fn hotspotScore(func: core.types.FuncInfo) u64 {
+pub fn hotspotScore(func: core.types.FuncInfo) u64 {
     const cyclomatic = func.cyclomatic_complexity orelse 0;
     const cognitive = func.cognitive_complexity orelse 0;
     return @as(u64, cyclomatic) * 1_000_000 + @as(u64, cognitive) * 1_000 + func.line_count;
 }
 
-fn collectHotspots(
+pub fn collectHotspots(
     allocator: std.mem.Allocator,
     file_funcs: []const metrics.dead_code.FileFuncs,
 ) ![]const JsonHotspot {
@@ -676,7 +758,7 @@ fn collectHotspots(
     return try hotspots.toOwnedSlice(allocator);
 }
 
-fn collectDepthEntries(
+pub fn collectDepthEntries(
     allocator: std.mem.Allocator,
     file_paths: []const []const u8,
     import_edges: []const core.types.ImportEdge,
@@ -707,7 +789,7 @@ fn collectDepthEntries(
     if (entries.items.len == 0 and file_paths.len != 0) try entries.append(allocator, 0);
 }
 
-fn buildDepthPath(
+pub fn buildDepthPath(
     allocator: std.mem.Allocator,
     file_paths: []const []const u8,
     import_edges: []const core.types.ImportEdge,
@@ -738,7 +820,7 @@ fn buildDepthPath(
     return try path.toOwnedSlice(allocator);
 }
 
-fn makeJsonScan(path: []const u8, result: Analysis) JsonScan {
+pub fn makeJsonScan(path: []const u8, result: Analysis) JsonScan {
     const report = result.report;
     return .{
         .schema_version = json_schema_version,
@@ -769,7 +851,7 @@ fn makeJsonScan(path: []const u8, result: Analysis) JsonScan {
     };
 }
 
-fn printHumanScan(result: Analysis) void {
+pub fn printHumanScan(result: Analysis) void {
     const report = result.report;
     std.debug.print("Found {d} files, {d} lines\n", .{ report.file_count, report.line_count });
     std.debug.print("\n", .{});
@@ -814,7 +896,7 @@ fn printHumanScan(result: Analysis) void {
     }
 }
 
-fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
+pub fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     if (!json_flag) std.debug.print("Scanning {s}...\n", .{path});
@@ -828,23 +910,23 @@ fn runScan(io: std.Io, path: []const u8, json_flag: bool) !void {
     }
 }
 
-const CheckExecution = struct {
+pub const CheckExecution = struct {
     report: metrics.HealthReport,
     check: core.rules.CheckResult,
 };
 
-const GateSaveExecution = struct {
+pub const GateSaveExecution = struct {
     report: metrics.HealthReport,
 };
 
-const GateCompareExecution = struct {
+pub const GateCompareExecution = struct {
     baseline: core.baseline.Baseline,
     current: core.baseline.Baseline,
     report: metrics.HealthReport,
     violations: []const []const u8,
 };
 
-fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckExecution {
+pub fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckExecution {
     try validateRoot(io, path);
     const rules_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/rules.toml", .{path});
     const rules_contents = (try readOptionalFile(arena, io, rules_path)) orelse return error.NoRulesFile;
@@ -865,6 +947,7 @@ fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckE
         .cycle_count = report.root_cause_raw.cycle_count,
         .max_file_lines = result.max_file_lines,
         .max_fn_lines = result.max_fn_lines,
+        .functions = result.functions,
         .import_edges = edges,
         .file_paths = result.file_paths,
     };
@@ -874,7 +957,7 @@ fn evaluateCheck(arena: std.mem.Allocator, io: std.Io, path: []const u8) !CheckE
     };
 }
 
-fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
+pub fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
@@ -903,8 +986,10 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
                 .rule = violation.rule,
                 .severity = violation.severity.label(),
                 .message = violation.message,
-                .from = if (violation.files.len >= 2) violation.files[0] else null,
+                .from = if (violation.files.len >= 1) violation.files[0] else null,
                 .to = if (violation.files.len >= 2) violation.files[1] else null,
+                .subject = violation.subject,
+                .line = violation.line,
             };
         }
         const payload = JsonCheck{
@@ -931,6 +1016,8 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     }
     for (check.violations) |violation| {
         std.debug.print("x [{s}] {s}: {s}\n", .{ violation.severity.label(), violation.rule, violation.message });
+        // A single-file violation already names the file in its message; only
+        // edge rules need the explicit `from -> to` line underneath.
         if (violation.files.len >= 2) {
             std.debug.print("    {s} -> {s}\n", .{ violation.files[0], violation.files[1] });
         }
@@ -939,7 +1026,7 @@ fn runCheck(io: std.Io, path: []const u8, json_flag: bool) !void {
     return error.CheckFailed;
 }
 
-fn saveGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateSaveExecution {
+pub fn saveGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateSaveExecution {
     try validateRoot(io, path);
     const baseline_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/baseline.json", .{path});
     const result = try runAnalysis(arena, io, path);
@@ -963,7 +1050,7 @@ fn saveGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateSaveExe
     return .{ .report = result.report };
 }
 
-fn compareGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateCompareExecution {
+pub fn compareGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateCompareExecution {
     try validateRoot(io, path);
     const baseline_path = try std.fmt.allocPrint(arena, "{s}/.tdlearn/baseline.json", .{path});
     const baseline_contents = (try readOptionalFile(arena, io, baseline_path)) orelse return error.NoBaseline;
@@ -985,7 +1072,7 @@ fn compareGate(arena: std.mem.Allocator, io: std.Io, path: []const u8) !GateComp
     };
 }
 
-fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void {
+pub fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
@@ -1062,258 +1149,4 @@ fn runGate(io: std.Io, path: []const u8, save_mode: bool, json_flag: bool) !void
     }
     std.debug.print("\nDEGRADED — {d} regression(s)\n", .{violations.len});
     return error.GateFailed;
-}
-
-test "analysis pipeline runs against a temporary project" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
-    src_dir.close(io);
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "src/main.zig",
-        .data =
-        \\const helper = @import("helper.zig");
-        \\pub fn main() void {
-        \\    helper();
-        \\}
-        ,
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "src/helper.zig",
-        .data =
-        \\pub fn helper() void {}
-        ,
-    });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const result = try runAnalysis(arena.allocator(), io, project_path);
-    try std.testing.expectEqual(@as(u32, 2), result.report.file_count);
-    try std.testing.expectEqual(@as(usize, 1), result.import_edges.len);
-    try std.testing.expectEqual(@as(u32, 2), result.report.total_functions);
-    try std.testing.expectEqual(@as(u32, 0), result.report.dead_functions);
-}
-
-test "oversized and non-parseable files are skipped, not fatal" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
-    src_dir.close(io);
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/small.zig", .data = "pub fn small() void {}\n" });
-
-    // Larger than the 100 KiB parse limit, smaller than the walker's 512 KiB
-    // file limit: the file is walked, counted and then skipped for parsing.
-    const big_line = "pub fn big() void {}\n";
-    var big = try std.testing.allocator.alloc(u8, 101 * 1024);
-    defer std.testing.allocator.free(big);
-    @memset(big, 'x');
-    @memcpy(big[0..big_line.len], big_line);
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/big.zig", .data = big });
-
-    // Larger than the walker's 512 KiB file limit: the file never becomes a
-    // node, is not line-counted and never reaches the parser.
-    var huge = try std.testing.allocator.alloc(u8, 600 * 1024);
-    defer std.testing.allocator.free(huge);
-    @memset(huge, 'x');
-    @memcpy(huge[0..big_line.len], big_line);
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/huge.zig", .data = huge });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const result = try runAnalysis(arena.allocator(), io, project_path);
-
-    // Both oversized files are absent from the graph and from `file_count`; each
-    // is reported with the limit it hit instead of aborting the run.
-    try std.testing.expectEqual(@as(u32, 1), result.report.file_count);
-    try std.testing.expectEqual(@as(u32, 1), result.report.total_functions);
-    try std.testing.expectEqual(@as(usize, 2), result.skipped_files.len);
-    try std.testing.expectEqualStrings("parse_too_large", skipReason(result.skipped_files, "src/big.zig") orelse "missing");
-    try std.testing.expectEqualStrings("file_too_large", skipReason(result.skipped_files, "src/huge.zig") orelse "missing");
-}
-
-/// Look up the reason a path was skipped. Returns null when the path is absent,
-/// so a missing entry fails the assertion below with "missing" as the value
-/// instead of needing a print to explain what went wrong.
-fn skipReason(skipped: []const analysis.walker.SkippedFile, path: []const u8) ?[]const u8 {
-    for (skipped) |entry| {
-        if (std.mem.eql(u8, entry.path, path)) return entry.reason;
-    }
-    return null;
-}
-
-test "temporary project supports check and gate evaluation" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
-    src_dir.close(io);
-    var rules_dir = try tmp.dir.createDirPathOpen(io, ".tdlearn", .{});
-    rules_dir.close(io);
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = ".tdlearn/rules.toml",
-        .data = "[constraints]\nmin_quality = 0.0\n",
-    });
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const check = try evaluateCheck(arena.allocator(), io, project_path);
-    try std.testing.expect(check.check.pass());
-    const saved = try saveGate(arena.allocator(), io, project_path);
-    try std.testing.expectEqual(@as(u32, 1), saved.report.file_count);
-    const compared = try compareGate(arena.allocator(), io, project_path);
-    try std.testing.expectEqual(@as(usize, 0), compared.violations.len);
-}
-
-test "temporary invalid rules are rejected before output" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var rules_dir = try tmp.dir.createDirPathOpen(io, ".tdlearn", .{});
-    rules_dir.close(io);
-    try tmp.dir.writeFile(io, .{
-        .sub_path = ".tdlearn/rules.toml",
-        .data = "[constraints]\nmin_quality = 2.0\n",
-    });
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.testing.expectError(error.InvalidRules, evaluateCheck(arena.allocator(), io, project_path));
-}
-
-test "temporary command helpers return typed setup errors" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var src_dir = try tmp.dir.createDirPathOpen(io, "src", .{});
-    src_dir.close(io);
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void {}\n" });
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const project_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.testing.expectError(error.NoRulesFile, evaluateCheck(arena.allocator(), io, project_path));
-    try std.testing.expectError(error.NoBaseline, compareGate(arena.allocator(), io, project_path));
-}
-
-test "filter source paths excludes non-source files" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const all_paths = [_][]const u8{
-        "src/main.zig",
-        "README.md",
-        "src/app.py",
-        "package.json",
-        "src/types.ts",
-    };
-    const source_paths = try filterSourcePaths(arena.allocator(), &all_paths);
-    try std.testing.expectEqual(@as(usize, 3), source_paths.len);
-    try std.testing.expectEqualStrings("src/main.zig", source_paths[0]);
-    try std.testing.expectEqualStrings("src/app.py", source_paths[1]);
-    try std.testing.expectEqualStrings("src/types.ts", source_paths[2]);
-}
-
-test "json error envelope has stable fields" {
-    const payload = JsonError{
-        .schema_version = json_schema_version,
-        .tool_version = tool_version,
-        .ok = false,
-        .error_info = .{
-            .code = "InvalidRules",
-            .category = "configuration",
-            .message = "InvalidRules",
-        },
-    };
-    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, payload, .{});
-    defer std.testing.allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"category\":\"configuration\"") != null);
-}
-
-test "hotspots are sorted by complexity score" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const funcs = [_]core.types.FuncInfo{
-        .{
-            .name = "low",
-            .start_line = 1,
-            .end_line = 2,
-            .line_count = 2,
-            .cyclomatic_complexity = 2,
-            .cognitive_complexity = 2,
-        },
-        .{
-            .name = "high",
-            .start_line = 1,
-            .end_line = 20,
-            .line_count = 20,
-            .cyclomatic_complexity = 20,
-            .cognitive_complexity = 30,
-        },
-    };
-    const files = [_]metrics.dead_code.FileFuncs{
-        .{ .file = "src/lib.zig", .contents = "", .funcs = &funcs },
-    };
-    const hotspots = try collectHotspots(arena.allocator(), &files);
-    try std.testing.expectEqual(@as(usize, 2), hotspots.len);
-    try std.testing.expectEqualStrings("high", hotspots[0].name);
-    try std.testing.expectEqualStrings("low", hotspots[1].name);
-}
-
-test "depth path maps solver nodes to source paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const paths = [_][]const u8{ "src/main.zig", "src/lib.zig", "src/util.zig" };
-    const edges = [_]core.types.ImportEdge{
-        .{ .from_file = "src/main.zig", .to_file = "src/lib.zig" },
-        .{ .from_file = "src/lib.zig", .to_file = "src/util.zig" },
-    };
-    const path = try buildDepthPath(arena.allocator(), &paths, &edges);
-    try std.testing.expectEqualSlices([]const u8, &paths, path);
-}
-
-test "json payloads expose root and units" {
-    try std.testing.expectEqualStrings("0-10000", jsonUnits().quality_signal);
-    try std.testing.expectEqualStrings("lines", jsonUnits().line_counts);
-    try std.testing.expectEqualStrings("edges", jsonUnits().edge_counts);
-    try std.testing.expect(hasJsonFlag(&[_][]const u8{ "path", "--json" }));
-    try std.testing.expect(!hasJsonFlag(&[_][]const u8{ "--", "--json" }));
-    try std.testing.expectEqualStrings("usage", errorCategory("UnknownFlag"));
-    try std.testing.expectEqualStrings("baseline", errorCategory("NoBaseline"));
-}
-
-test "parse options accepts flags and path" {
-    const args = [_][]const u8{ "--json", "project" };
-    const options = try parseOptions("scan", &args);
-    try std.testing.expectEqualStrings("project", options.path);
-    try std.testing.expect(options.json);
-    try std.testing.expect(!options.save);
-}
-
-test "parse options supports escaped path" {
-    const args = [_][]const u8{ "--", "-project" };
-    const options = try parseOptions("scan", &args);
-    try std.testing.expectEqualStrings("-project", options.path);
-}
-
-test "parse options rejects invalid combinations" {
-    const unknown = [_][]const u8{"--bogus"};
-    try std.testing.expectError(error.UnknownFlag, parseOptions("scan", &unknown));
-
-    const extra = [_][]const u8{ "one", "two" };
-    try std.testing.expectError(error.ExtraArgument, parseOptions("scan", &extra));
-
-    const duplicate = [_][]const u8{ "--json", "--json" };
-    try std.testing.expectError(error.DuplicateFlag, parseOptions("scan", &duplicate));
-
-    const invalid_save = [_][]const u8{"--save"};
-    try std.testing.expectError(error.InvalidFlag, parseOptions("scan", &invalid_save));
 }

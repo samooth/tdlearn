@@ -158,22 +158,22 @@ changes):
 ```
 $ tdlearn scan .
 Scanning ....
-Found 31 files, 12909 lines
+Found 33 files, 13888 lines
 
-Quality Signal: 7118/10000
-Bottleneck: equality
-Import edges: 56, call edges: 43, inherit edges: 0
-Functions: 356 (dead: 0, duplicated: 5)
+Quality Signal: 7111/10000
+Bottleneck: depth
+Import edges: 62, call edges: 44, inherit edges: 0
+Functions: 395 (dead: 0, duplicated: 5)
 
 Root Causes:
-  Modularity:  0.658 (raw Q=0.488)
+  Modularity:  0.650 (raw Q=0.474)
   Acyclicity:  1.000 (cycles=0)
-  Depth:       0.533 (max=7)
-  Equality:    0.528 (gini=0.472)
-  Redundancy:  0.986 (ratio=0.014)
+  Depth:       0.500 (max=8)
+  Equality:    0.567 (gini=0.433)
+  Redundancy:  0.987 (ratio=0.013)
 Longest path: src/main.zig -> src/analysis/mod.zig -> ... -> src/core/toml.zig
 Function hotspots:
-  src/core/toml.zig:parseValue lines=72 cyclomatic=31 cognitive=72
+  src/main.zig:main lines=62 cyclomatic=20 cognitive=34
   ...
 ```
 
@@ -195,17 +195,30 @@ project — see [Skipped files](#skipped-files).
 | `max_cycles` | unsigned int | allowed SCC cycles in the union graph |
 | `max_file_lines` | unsigned int | largest allowed file |
 | `max_fn_lines` | unsigned int | largest allowed function |
+| `max_cyclomatic` | unsigned int | cyclomatic complexity ceiling, **per function** |
+| `max_cognitive` | unsigned int | cognitive complexity ceiling, **per function** |
 
 Every key is optional; a key that is absent is not checked, and `tdlearn check`
 reports how many rules it actually evaluated — this repository's own config
-below reports `tdlearn check — 7 rules checked`. Unknown keys, non-integer
+below reports `tdlearn check — 9 rules checked`. Unknown keys, non-integer
 values for `max_*`, and scores outside `[0, 1]` are rejected — a malformed
 config can never make `check` pass.
 
 `max_file_lines` and `max_fn_lines` compare against the **largest** file and
-function in the tree, not per file. There is no per-file or per-layer override;
-if you need a higher ceiling for one directory, the only lever today is the
-global value.
+function in the tree, so they report one number and you look up the culprit in
+`scan`'s `hotspots`. The two complexity ceilings are different on purpose: they
+report **every** function over the line, each with its file, line and name, so
+the output is a work list:
+
+```
+x [Error] max_cyclomatic: src/core/toml.zig:192: parseValue has cyclomatic complexity 31 > allowed 20
+```
+
+`scan` sorts its top-10 `hotspots` by cyclomatic first, so a function can be
+invisible there while breaching a ceiling — which is why `check` is the place
+that enforces them. There is no per-file or per-layer override for any ceiling;
+if you need a higher one for a directory, the only lever today is the global
+value.
 
 ### Layers and boundaries
 
@@ -216,6 +229,8 @@ min_modularity = 0.5       # per-root-cause floors (optional)
 max_cycles = 0             # allowed dependency cycles
 max_file_lines = 400       # largest allowed file
 max_fn_lines = 80          # largest allowed function
+max_cyclomatic = 20        # per-function ceilings, reported per function
+max_cognitive = 45
 
 # Layer ordering — HIGHER order = more foundational.
 # A file importing a layer with LOWER order than its own is a violation.
@@ -240,18 +255,21 @@ Layer and boundary paths are root-relative, UTF-8, and use `/` as the canonical 
 
 ### This repository's own rules
 
-tdlearn dogfoods its rules through `.tdlearn/rules.toml`, which is stricter
-than the example above in one deliberate way, and that difference is recorded
-here and inline in the file:
+tdlearn dogfoods its rules through `.tdlearn/rules.toml`, and where it differs
+from the example above the difference is deliberate and recorded both here and
+inline in the file:
 
-- **`max_file_lines = 1400`, not 400.** The largest file is
-  `src/core/rules.zig` (1308 lines: 920 of implementation plus 388 of
-  table-driven tests for those exact semantics). Because the constraint is a
-  single global ceiling with no per-file override, 1400 is the narrowest value
-  that admits that file. It is a ceiling, not a target: the next file to cross
-  it fails `tdlearn check .` in CI, and lowering the value fails until
-  `rules.zig` is split. The split is tracked as QA-002 in `TODO.md` and is
-  deliberately not faked here with a threshold bump.
+- **`max_file_lines = 1200`, not 400.** The largest implementation file is
+  `src/main.zig` at 1152 lines. This ceiling used to be 1400 with a documented
+  exception, because `src/core/rules.zig` still carried its own 388 lines of
+  tests; those tests now live in `src/core/rules_test.zig`, and the CLI's in
+  `src/main_test.zig`, so no file under `src/` mixes implementation and tests
+  any more and the exception is gone.
+- **`max_cyclomatic = 20` and `max_cognitive = 45`.** These hold down the tail
+  that the `equality` root cause measures (a Gini over function complexity), so
+  the score cannot quietly rot while the quality signal still looks fine. Eleven
+  functions were over one ceiling or the other when the rules were added; each
+  was split into named helpers rather than silenced by raising the value.
 - `max_cycles = 0` is redundant with the acyclicity root cause on purpose.
   `gate` only fails on a cycle *increase* against the baseline, so a cycle
   regression introduced alongside an unrelated quality gain would slip through
@@ -303,22 +321,22 @@ self-consistent, and any other `schema_version` is rejected with
   "ok": true,
   "root": ".",
   "units": { "quality_signal": "0-10000", "line_counts": "lines", "edge_counts": "edges" },
-  "quality_signal": 7118,
-  "bottleneck": "equality",
-  "files": 31,
-  "lines": 12909,
-  "import_edges": 56,
-  "call_edges": 43,
+  "quality_signal": 7111,
+  "bottleneck": "depth",
+  "files": 33,
+  "lines": 13888,
+  "import_edges": 62,
+  "call_edges": 44,
   "inherit_edges": 0,
-  "functions": 356,
+  "functions": 395,
   "dead_functions": 0,
   "duplicate_functions": 5,
   "root_causes": {
-    "modularity": 6584,
+    "modularity": 6495,
     "acyclicity": 10000,
-    "depth": 5333,
-    "equality": 5279,
-    "redundancy": 9858
+    "depth": 5000,
+    "equality": 5672,
+    "redundancy": 9872
   },
   "depth_path": [
     "src/main.zig",
@@ -327,17 +345,18 @@ self-consistent, and any other `schema_version` is rejected with
     "src/analysis/resolver.zig",
     "src/analysis/manifests.zig",
     "src/core/mod.zig",
+    "src/core/rules_test.zig",
     "src/core/rules.zig",
     "src/core/toml.zig"
   ],
   "hotspots": [
     {
-      "file": "src/core/toml.zig",
-      "name": "parseValue",
-      "lines": 72,
-      "cyclomatic": 31,
-      "cognitive": 72,
-      "score": 31072072
+      "file": "src/main.zig",
+      "name": "main",
+      "lines": 62,
+      "cyclomatic": 20,
+      "cognitive": 34,
+      "score": 20034062
     }
   ],
   "skipped_files": []
@@ -348,6 +367,21 @@ self-consistent, and any other `schema_version` is rejected with
 `hotspots` with the ten most complex functions. JSON errors use the same schema
 and an `ok: false` envelope with `error_info.code`, `category` and `message`.
 `gate` adds the `baseline` and `current` metrics.
+
+A `check` violation is a JSON object with:
+
+| Field | Meaning |
+| --- | --- |
+| `rule` | the configuration key that was violated |
+| `severity` | `Error` (fails the exit code) or `Warning` |
+| `message` | the finding in one line, enough to act on without the other fields |
+| `from` | the file the violation is about, or `null` for aggregate rules |
+| `to` | the other end of an edge violation, or `null` when there is none |
+| `subject` | the offending function name, or `null` for non-per-function rules |
+| `line` | 1-based line of `subject`, for a CI annotation, or `null` |
+
+Per-function complexity violations carry all three of `from`, `subject` and
+`line`, so a consumer can group or annotate them without parsing `message`.
 
 `hotspots[].score` is `cyclomatic × 1_000_000 + cognitive × 1_000 + lines` —
 a lexicographic sort key, so it should be read as "cyclomatic first", not as
@@ -382,13 +416,22 @@ src/
 ├── analysis/       # walker, language registry, import extraction + resolution,
 │                   #   function/class extraction, call + inherit graphs
 ├── metrics/        # 5 root cause metrics, dead-code analysis, aggregation
-└── main.zig        # CLI: scan / check / gate
+├── main.zig        # CLI: scan / check / gate
+└── *_test.zig      # tests, one per module that is big enough to want them out
 ```
 
 Layering is enforced by `.tdlearn/rules.toml`: `core` is the most foundational
-(order 3), `metrics` and `analysis` sit on it (order 2), and `main.zig` is the
-CLI on top (order 0). A file may only import layers with an order greater than
-or equal to its own.
+(order 3), `metrics` and `analysis` sit on it (order 2), and the CLI is on top
+(order 0). A file may only import layers with an order greater than or equal to
+its own.
+
+Tests live in their own `*_test.zig` next to the module they cover
+(`rules_test.zig`, `dead_code_test.zig`, `oom_test.zig`, `main_test.zig`), which
+is what lets `max_file_lines` bound implementation instead of mixing it with
+tests. `rules_test.zig` and `dead_code_test.zig` drive the module through its
+public API only; `main_test.zig` imports `main.zig` to drive the pipeline's
+internal steps, and `build.zig` roots that test artifact at the test file so the
+dependency stays one way.
 
 Function, class and import extraction share one `core/source_lexer.zig`, so
 comments and string/template/raw literals are masked once, consistently, for

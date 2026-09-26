@@ -95,6 +95,11 @@ pub const FileFuncs = struct {
     file: []const u8,
     contents: []const u8,
     funcs: []const FuncInfo,
+    /// Language of `file`, as reported by the language registry. Carried here
+    /// so consumers that need to lex the contents (the call scanner) do not
+    /// each have to re-derive it from the extension. Empty means "unknown",
+    /// which the lexer treats as the permissive fallback.
+    lang: []const u8 = "",
 };
 
 // ═══════════════════════════════════════════════════════════════

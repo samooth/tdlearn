@@ -9,6 +9,22 @@ const Allocator = std.mem.Allocator;
 /// on value lines are stripped (outside quotes).
 ///
 /// Not supported: multi-line strings, nested tables, dotted keys, dates.
+///
+/// `parseValue` and `parseArray` call each other — an array holds values — so
+/// the value errors are a named set. With inferred error sets that mutual
+/// recursion is a compile error ("dependency loop with length 2"), and the
+/// explicit set also documents exactly which failures a value can have.
+pub const ValueError = error{
+    EmptyValue,
+    UnterminatedString,
+    InvalidString,
+    UnsupportedString,
+    UnterminatedArray,
+    EmptyArrayItem,
+    InvalidValue,
+    OutOfMemory,
+};
+
 pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
@@ -189,68 +205,17 @@ pub const Toml = struct {
         return &self.tables.items[self.tables.items.len - 1];
     }
 
-    fn parseValue(sa: Allocator, s: []const u8) !Value {
+    /// Dispatch on the first byte: a quoted string, a boolean, an array, or a
+    /// number. Each kind has its own function because the array and string
+    /// forms carry real parsing; the dispatch itself stays flat.
+    fn parseValue(sa: Allocator, s: []const u8) ValueError!Value {
         if (s.len == 0) return error.EmptyValue;
-        if (s[0] == '"') {
-            if (s.len < 2 or s[s.len - 1] != '"') return error.UnterminatedString;
-            var escaped = false;
-            var end: ?usize = null;
-            for (s[1..], 1..) |character, index| {
-                if (escaped) {
-                    escaped = false;
-                    continue;
-                }
-                if (character == '\\') {
-                    escaped = true;
-                } else if (character == '"') {
-                    end = index;
-                    break;
-                }
-            }
-            const close = end orelse return error.UnterminatedString;
-            if (close != s.len - 1) return error.InvalidString;
-            return Value{ .string = s[1..close] };
-        }
+        if (s[0] == '"') return parseDoubleQuoted(s);
         if (s[0] == '\'') return error.UnsupportedString;
         // Boolean
         if (std.mem.eql(u8, s, "true")) return Value{ .boolean = true };
         if (std.mem.eql(u8, s, "false")) return Value{ .boolean = false };
-        if (s[0] == '[') {
-            if (s.len < 2 or s[s.len - 1] != ']') return error.UnterminatedArray;
-            var items = std.ArrayList(Value).empty;
-            var inner = s[1 .. s.len - 1];
-            while (inner.len > 0) {
-                inner = std.mem.trimStart(u8, inner, " \t,");
-                if (inner.len == 0) break;
-                // Find end of this item: quote close or comma at depth 0
-                var i: usize = 0;
-                var in_str = false;
-                var escaped = false;
-                var item_end: usize = inner.len;
-                while (i < inner.len) : (i += 1) {
-                    const c = inner[i];
-                    if (in_str) {
-                        if (c == '\\' and !escaped) {
-                            escaped = true;
-                        } else {
-                            if (c == '"' and !escaped) in_str = false;
-                            escaped = false;
-                        }
-                    } else if (c == '"') {
-                        in_str = true;
-                    } else if (c == ',') {
-                        item_end = i;
-                        break;
-                    }
-                }
-                if (in_str) return error.UnterminatedString;
-                const item = std.mem.trim(u8, inner[0..item_end], " \t");
-                if (item.len == 0) return error.EmptyArrayItem;
-                try items.append(sa, try parseValue(sa, item));
-                inner = if (item_end < inner.len) inner[item_end + 1 ..] else inner[inner.len..];
-            }
-            return Value{ .array = try items.toOwnedSlice(sa) };
-        }
+        if (s[0] == '[') return parseArray(sa, s);
         // Integer
         if (std.fmt.parseInt(i64, s, 10)) |i| {
             return Value{ .integer = i };
@@ -260,6 +225,84 @@ pub const Toml = struct {
             return Value{ .float = f };
         } else |_| {}
         return error.InvalidValue;
+    }
+
+    /// A double-quoted string that must span the whole value. Returns the
+    /// contents with the quotes stripped; the escape sequences inside are kept
+    /// verbatim, so `Value.asString` hands back what was written.
+    fn parseDoubleQuoted(s: []const u8) ValueError!Value {
+        if (s.len < 2 or s[s.len - 1] != '"') return error.UnterminatedString;
+        var escaped = false;
+        var end: ?usize = null;
+        for (s[1..], 1..) |character, index| {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (character == '\\') {
+                escaped = true;
+            } else if (character == '"') {
+                end = index;
+                break;
+            }
+        }
+        const close = end orelse return error.UnterminatedString;
+        if (close != s.len - 1) return error.InvalidString;
+        return Value{ .string = s[1..close] };
+    }
+
+    fn parseArray(sa: Allocator, s: []const u8) ValueError!Value {
+        if (s.len < 2 or s[s.len - 1] != ']') return error.UnterminatedArray;
+        var items = std.ArrayList(Value).empty;
+        var inner = s[1 .. s.len - 1];
+        while (inner.len > 0) {
+            inner = std.mem.trimStart(u8, inner, " \t,");
+            if (inner.len == 0) break;
+            const next = try nextArrayItem(inner);
+            const item = std.mem.trim(u8, next.text, " \t");
+            if (item.len == 0) return error.EmptyArrayItem;
+            try items.append(sa, try parseValue(sa, item));
+            inner = next.rest;
+        }
+        return Value{ .array = try items.toOwnedSlice(sa) };
+    }
+
+    const ArrayItem = struct {
+        /// The item text, untrimmed and without its trailing comma.
+        text: []const u8,
+        /// Whatever follows the item, starting at the next element.
+        rest: []const u8,
+    };
+
+    /// One array element: up to the next comma that is not inside a string.
+    /// Returns null when a string is left open, which the caller reports as an
+    /// unterminated string rather than silently accepting a broken array.
+    fn nextArrayItem(inner: []const u8) ValueError!ArrayItem {
+        var i: usize = 0;
+        var in_str = false;
+        var escaped = false;
+        var item_end: usize = inner.len;
+        while (i < inner.len) : (i += 1) {
+            const c = inner[i];
+            if (in_str) {
+                if (c == '\\' and !escaped) {
+                    escaped = true;
+                } else {
+                    if (c == '"' and !escaped) in_str = false;
+                    escaped = false;
+                }
+            } else if (c == '"') {
+                in_str = true;
+            } else if (c == ',') {
+                item_end = i;
+                break;
+            }
+        }
+        if (in_str) return error.UnterminatedString;
+        return .{
+            .text = inner[0..item_end],
+            .rest = if (item_end < inner.len) inner[item_end + 1 ..] else inner[inner.len..],
+        };
     }
 
     /// Strip a trailing comment from a line, respecting double quotes.

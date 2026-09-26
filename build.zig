@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     addRunCommand(b, exe);
-    addTestStep(b, core_mod, metrics_mod, analysis_mod, exe_mod);
+    addTestStep(b, target, optimize, core_mod, metrics_mod, analysis_mod);
 }
 
 fn addRunCommand(b: *std.Build, exe: anytype) void {
@@ -61,11 +61,31 @@ fn addRunCommand(b: *std.Build, exe: anytype) void {
     run_step.dependOn(&run_cmd.step);
 }
 
-fn addTestStep(b: *std.Build, core_mod: anytype, metrics_mod: anytype, analysis_mod: anytype, exe_mod: anytype) void {
+fn addTestStep(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core_mod: anytype,
+    metrics_mod: anytype,
+    analysis_mod: anytype,
+) void {
     const core_tests = b.addTest(.{ .root_module = core_mod });
     const metrics_tests = b.addTest(.{ .root_module = metrics_mod });
     const analysis_tests = b.addTest(.{ .root_module = analysis_mod });
-    const main_tests = b.addTest(.{ .root_module = exe_mod });
+
+    // The `main` tests live in `src/main_test.zig` and import `src/main.zig`, so
+    // this artifact is rooted at the test file rather than at the executable
+    // root. The dependency stays one way (tests → implementation), and
+    // `max_file_lines` bounds the implementation instead of its tests.
+    const main_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    main_test_mod.addImport("core", core_mod);
+    main_test_mod.addImport("metrics", metrics_mod);
+    main_test_mod.addImport("analysis", analysis_mod);
+    const main_tests = b.addTest(.{ .root_module = main_test_mod });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     test_step.dependOn(&b.addRunArtifact(metrics_tests).step);

@@ -663,48 +663,88 @@ fn markCallTargets(
     return changed;
 }
 
+/// One call site, reduced to what propagation needs: the enclosing function
+/// (if any) and the name it calls.
+const CallOrigin = struct {
+    from_id: ?usize,
+    file: []const u8,
+    name: []const u8,
+};
+
+fn originOf(records: []const FunctionRecord, call: LocalCall) CallOrigin {
+    const from_id = call.from orelse return .{ .from_id = null, .file = "", .name = "" };
+    const record = records[from_id];
+    return .{ .from_id = from_id, .file = record.file, .name = record.func.name };
+}
+
+/// Mark every function that `call.callee` names as reachable, and report whether
+/// anything changed. The rules, in order:
+///
+///   * a call from inside a known function only propagates if that function is
+///     already reachable,
+///   * a local definition of the name wins over the cross-file graph, so a
+///     private helper called by name is not shadowed by a public function of
+///     the same name in another file,
+///   * a call with no resolved edge at all and no local definition stays
+///     unresolved rather than marking every function of that name in the tree.
 fn markLocalTargets(
     records: []const FunctionRecord,
     reachable: []bool,
     call: LocalCall,
     call_edges: []const core.types.CallEdge,
 ) bool {
-    var changed = false;
-    if (call.from) |from_id| {
+    const origin = originOf(records, call);
+    if (origin.from_id) |from_id| {
         if (from_id >= records.len or !reachable[from_id]) return false;
     }
-    const source_file = if (call.from) |from_id| records[from_id].file else "";
-    const source_name = if (call.from) |from_id| records[from_id].func.name else "";
-    var has_local_target = false;
-    for (records) |target| {
-        if (call.from != null and std.mem.eql(u8, target.file, source_file) and
-            std.mem.eql(u8, target.func.name, call.callee))
-        {
-            has_local_target = true;
-            break;
-        }
-    }
-    var has_resolved_edge = false;
-    if (call.from != null) {
-        for (call_edges) |edge| {
-            if (std.mem.eql(u8, edge.from_file, source_file) and
-                std.mem.eql(u8, edge.from_func, source_name) and
-                std.mem.eql(u8, edge.to_func, call.callee))
-            {
-                has_resolved_edge = true;
-                break;
-            }
-        }
-    }
+    const has_local_target = hasLocalDefinition(records, call, origin);
+    const has_resolved_edge = hasGraphEdge(call_edges, call, origin);
+
+    var changed = false;
     for (records, 0..) |target, target_id| {
         if (reachable[target_id]) continue;
-        if (call.from != null and has_local_target and !std.mem.eql(u8, target.file, source_file)) continue;
-        if (call.from != null and !has_local_target and has_resolved_edge) continue;
+        if (skipsTarget(origin, target, has_local_target, has_resolved_edge)) continue;
         if (!std.mem.eql(u8, target.func.name, call.callee)) continue;
         reachable[target_id] = true;
         changed = true;
     }
     return changed;
+}
+
+/// A definition of the called name in the caller's own file.
+fn hasLocalDefinition(records: []const FunctionRecord, call: LocalCall, origin: CallOrigin) bool {
+    if (origin.from_id == null) return false;
+    for (records) |target| {
+        if (!std.mem.eql(u8, target.file, origin.file)) continue;
+        if (std.mem.eql(u8, target.func.name, call.callee)) return true;
+    }
+    return false;
+}
+
+/// The call graph already resolved this call site to an edge.
+fn hasGraphEdge(call_edges: []const core.types.CallEdge, call: LocalCall, origin: CallOrigin) bool {
+    if (origin.from_id == null) return false;
+    for (call_edges) |edge| {
+        if (!std.mem.eql(u8, edge.from_file, origin.file)) continue;
+        if (!std.mem.eql(u8, edge.from_func, origin.name)) continue;
+        if (std.mem.eql(u8, edge.to_func, call.callee)) return true;
+    }
+    return false;
+}
+
+fn skipsTarget(
+    origin: CallOrigin,
+    target: FunctionRecord,
+    has_local_target: bool,
+    has_resolved_edge: bool,
+) bool {
+    if (origin.from_id == null) return false;
+    // A local definition exists: the call is about this file's own function.
+    if (has_local_target and !std.mem.eql(u8, target.file, origin.file)) return true;
+    // No local definition, but the graph resolved the call: trust the edge's
+    // decision rather than spreading the name across the whole tree.
+    if (!has_local_target and has_resolved_edge) return true;
+    return false;
 }
 
 fn hasOverlappingFunction(funcs: []const core.types.FuncInfo, index: usize) bool {

@@ -115,6 +115,12 @@ pub const Resolver = struct {
     /// Returns the resolved file path, or null if it doesn't map to a scanned file.
     /// Caller owns nothing — returned slice points into the file list.
     /// Scratch allocations are arena-scoped per call.
+    ///
+    /// The steps run in a fixed order and the standard-library guard sits in the
+    /// middle of it, so the phases are split around that guard rather than
+    /// around the syntax: the relative forms and package aliases must resolve
+    /// first (so "./std.zig" and "crate::core" still work), and everything after
+    /// the guard is unreachable for a bare stdlib name.
     pub fn resolve(self: *const Resolver, raw: []const u8, from_file: []const u8) !?[]const u8 {
         if (raw.len == 0) return null;
 
@@ -124,38 +130,63 @@ pub const Resolver = struct {
         const sa = scratch.allocator();
         const normalized_from = try normalizeSlashes(sa, from_file);
 
+        // Language-specific relative forms: "self::x", "super::x", ".mod".
+        // Tried before normalization because they are not paths yet.
         if (try self.resolveRustRelative(sa, raw, normalized_from)) |path| return path;
         if (try self.resolveDotRelative(sa, raw, normalized_from)) |path| return path;
 
         const normalized = try normalizeSeparators(sa, raw);
         if (normalized.len == 0) return null;
 
-        // 1. Relative path: ./foo or ../foo — resolve against from_file's dir
-        if (normalized[0] == '.' and normalized.len >= 2 and
-            (normalized[1] == '/' or normalized[1] == '.'))
-        {
+        if (try self.resolveDeclaredPaths(sa, normalized, normalized_from)) |path| return path;
+
+        // The standard-library guard is terminal, not a filter: a bare stdlib
+        // module reference never resolves to a scanned file.
+        if (isStdlibImport(raw, normalized_from)) return null;
+
+        // Exact / extension match, then suffix match on the raw module path.
+        if (try self.matchWithExtensions(sa, normalized)) |path| return path;
+        if (self.matchSuffixChain(normalized)) |path| return path;
+
+        if (try self.resolveModuleForms(sa, normalized, normalized_from)) |path| return path;
+
+        // An unresolved single identifier is the standard library or an external
+        // package; a multi-segment path is an npm or go module. Neither becomes
+        // an edge: inventing a dependency is worse than missing one.
+        return null;
+    }
+
+    /// An import that names a location: a relative path or a package alias.
+    fn resolveDeclaredPaths(
+        self: *const Resolver,
+        sa: Allocator,
+        normalized: []const u8,
+        normalized_from: []const u8,
+    ) !?[]const u8 {
+        // Relative path: ./foo or ../foo — resolve against from_file's dir
+        if (isDotPath(normalized)) {
             const from_dir = core.path_utils.parentDir(normalized_from) orelse "";
             if (try self.resolveRelative(sa, normalized, from_dir)) |path| return path;
         }
 
-        // 2.5 Package alias: first path segment names a known package
+        // Package alias: the first path segment names a known package
         // ("tdlearn_core/analysis" → "tdlearn-core/src/lib.rs" dir + analysis)
         if (try self.expandAlias(sa, normalized)) |expanded| {
             if (try self.matchWithExtensions(sa, expanded)) |path| return path;
             if (self.matchSuffixChain(expanded)) |path| return path;
         }
+        return null;
+    }
 
-        // 3. Standard-library guard: only bare module references are blocked,
-        // and only for the importing language. Explicit paths ("./std.zig",
-        // "crate::core", "tdlearn_core/…") already resolved above or carry a
-        // source extension, so genuine local modules keep resolving.
-        if (isStdlibImport(raw, normalized_from)) return null;
-
-        // 4. Exact / extension match, then suffix match on the raw module path
-        if (try self.matchWithExtensions(sa, normalized)) |path| return path;
-        if (self.matchSuffixChain(normalized)) |path| return path;
-
-        // 5. Dotted module paths (Python "mypkg.sub"): '.' → '/'
+    /// An import that names a module rather than a location: the dotted form and
+    /// the bare sibling reference.
+    fn resolveModuleForms(
+        self: *const Resolver,
+        sa: Allocator,
+        normalized: []const u8,
+        normalized_from: []const u8,
+    ) !?[]const u8 {
+        // Dotted module paths (Python "mypkg.sub"): '.' → '/'
         if (std.mem.indexOfScalar(u8, normalized, '.') != null) {
             const buf = try sa.dupe(u8, normalized);
             for (buf) |*c| {
@@ -165,19 +196,15 @@ pub const Resolver = struct {
             if (self.matchSuffixChain(buf)) |path| return path;
         }
 
-        // 6. Bare module reference: resolve relative to the importing file's dir.
-        // Covers Zig sibling imports: @import("lang_registry.zig") from src/analysis/walker.zig
-        if (core.path_utils.parentDir(normalized_from)) |from_dir| {
-            if (from_dir.len > 0) {
-                const joined = try std.mem.join(sa, "/", &.{ from_dir, normalized });
-                if (try self.matchWithExtensions(sa, joined)) |path| return path;
-                // Relative to parent dir + ../: deeper-package lookups
-                if (self.matchSuffixChain(joined)) |path| return path;
-            }
-        }
-
-        // 7. Unresolved single identifiers are stdlib/external — return null.
-        // Multi-segment paths (npm/go modules) also stay unresolved here.
+        // Bare module reference: resolve relative to the importing file's dir.
+        // Covers Zig sibling imports: @import("lang_registry.zig") from
+        // src/analysis/walker.zig
+        const from_dir = core.path_utils.parentDir(normalized_from) orelse return null;
+        if (from_dir.len == 0) return null;
+        const joined = try std.mem.join(sa, "/", &.{ from_dir, normalized });
+        if (try self.matchWithExtensions(sa, joined)) |path| return path;
+        // Relative to parent dir + ../: deeper-package lookups
+        if (self.matchSuffixChain(joined)) |path| return path;
         return null;
     }
 
@@ -358,6 +385,14 @@ pub const Resolver = struct {
         return buf[0..out];
     }
 };
+
+/// True for a path that explicitly walks into or up the tree: `./foo` or
+/// `../foo`. A bare `.` or a leading dot on an identifier (`.helpers`) is not a
+/// path here — that form belongs to the Python branch.
+fn isDotPath(normalized: []const u8) bool {
+    if (normalized.len < 2 or normalized[0] != '.') return false;
+    return normalized[1] == '/' or normalized[1] == '.';
+}
 
 fn stripExt(path: []const u8) []const u8 {
     const stem = core.path_utils.stripExtension(path);

@@ -298,13 +298,34 @@ Prioridades:
 - [x] Resolver o justificar las violaciones actuales de tamaño de archivo/función.
 - [x] Verificar que `tdlearn gate .` falla solo por regresiones reales.
 - [x] Añadir `max_cycles = 0` para que una regresión de ciclos no quede tapada por una ganancia de calidad.
-- [x] Regenerar `.tdlearn/baseline.json` una vez commitados los cambios que lo producían (`quality_signal` 0.7118, `total_functions` 356, `max_depth` 7, 0 ciclos, 0 muertas, 5 duplicadas). `total_functions` no participa en el gate (`src/core/baseline.zig`, `Baseline.compare`).
+- [x] Añadir `max_cyclomatic = 20` y `max_cognitive = 45` para que la cola de complejidad —la que mide `equality`— no pueda pudrirse en silencio (ver RULES-002).
+- [x] Regenerar `.tdlearn/baseline.json` una vez commitados los cambios que lo producían. `total_functions` no participa en el gate (`src/core/baseline.zig`, `Baseline.compare`).
 - [ ] Fijar las GitHub Actions por SHA, para que un tag upstream movido no cambie lo que ejecuta CI.
 
-### [ ] QA-002 — Partir `src/core/rules.zig` y bajar `max_file_lines`
+### [x] QA-002 — Partir `src/core/rules.zig` y bajar `max_file_lines`
 
-- Referencias: `src/core/rules.zig` (1308 líneas), `.tdlearn/rules.toml` (`max_file_lines = 1400`), `README.md` ("This repository's own rules").
+- Referencias: `src/core/rules.zig` (1091 líneas), `src/core/rules_test.zig` (608), `src/main.zig` (1152), `src/main_test.zig` (383), `.tdlearn/rules.toml` (`max_file_lines = 1200`), `README.md` ("This repository's own rules").
 - [x] Documentar la excepción de `max_file_lines = 1400` en `rules.toml` y en el README, en vez de subir el límite en silencio.
-- [ ] Separar el archivo: p. ej. `rules_parse.zig` (TOML y validación), `rules_glob.zig` (`globMatch`) y `rules_check.zig` (constraints, capas, boundaries), con los tests junto a cada módulo.
-- [ ] Bajar `max_file_lines` a un valor sostenible una vez partido y comprobar que `tdlearn check .` sigue en verde.
-- Motivo de no abordarlo aquí: es un refactor de código fuente, no de configuración, y los tests de `rules.zig` cubren el módulo completo.
+- [x] Sacar los 388 renglones de tests de `rules.zig` a `src/core/rules_test.zig`, que solo usa la API pública (`parseRules`, `checkRules`, `globMatch`): de paso demuestra que la superficie pública basta para configurar y verificar un proyecto. `rules.zig` baja a 1091.
+- [x] Sacar los tests del CLI a `src/main_test.zig` y enraizar el artefacto de test en ese archivo (`build.zig`, `addTestStep`), para que la dependencia sea de una sola dirección (tests → implementación) y ningún archivo mezcle implementación con tests.
+- [x] Bajar `max_file_lines` de 1400 a 1200 (el archivo mayor es `main.zig` con 1152) y quitar la excepción documentada: ya no aplica porque ningún archivo bajo `src/` lleva sus tests dentro.
+- Nota: al añadir `main_test.zig` al grafo, `max_depth` pasó de 7 a 8 y la señal bajó ~100 puntos. Es el comportamiento correcto del depth (la cadena de imports más larga ahora incluye un archivo de test); ver METRIC-005.
+
+### [x] RULES-002 — Techos de complejidad por función
+
+- Referencias: `src/core/rules.zig` (`Constraints.max_cyclomatic`/`max_cognitive`, `checkComplexityCeiling`, `ComplexityKind`), `src/main.zig` (`Analysis.functions`, `JsonViolation`), `src/core/types.zig` (`FileFuncs.lang`), `.tdlearn/rules.toml`.
+- [x] Añadir `max_cyclomatic` y `max_cognitive` al esquema, con validación (entero, sin negativos, sin desbordamiento) y rechazo de claves desconocidas.
+- [x] Reportar **cada** función que excede el techo, con archivo, línea, nombre y valor medido, ordenadas por archivo y línea; a diferencia de `max_fn_lines`, que solo da el mayor.
+- [x] Exponer `subject` y `line` en la violación (JSON y texto) para que un consumidor pueda agrupar o anotar sin parsear el mensaje, y arreglar `from`, que antes salía `null` en violaciones de un solo archivo.
+- [x] Contar reglas, no hallazgos: `rules_checked` sube 1 por techo configurado, no por violación.
+- [x] Corregir la deduplicación: comparaba solo regla y archivos, lo que habría colapsado dos funciones distintas del mismo archivo; ahora compara también mensaje y sujeto.
+- [x] Validar las rutas de las funciones con la misma `validateInputPath` que el resto de entradas (lo encontró un test).
+- [x] Refactorizar las 11 funciones que el techo nuevo señalaba, sin subirlas: `call_graph.appendResolvedEdges` (cognitivo 81), `toml.parseValue` (31), `source_lexer.sanitizeLine` (26), `inherit_graph.appendResolvedEdges` (52), `rules.checkConstraintRules`, `dead_code.markLocalTargets`, `functions.detectCFn`, `functions.countParameters`, `rules.validatePattern`, `rules.validateTomlSyntax`.
+- Costecolateral útil: al refactorizar `call_graph.scanLine` se corrigió un bug real — no ignoraba comentarios, así que toda llamada dentro de un `//` o `/* */` contaba como arista — y se pasó al lexer compartido.
+
+### [ ] METRIC-005 — Decidir si los archivos de test pertenecen al grafo de imports
+
+- Referencias: `src/metrics/depth.zig`, `src/metrics/modularity.zig`, `src/metrics/dead_code.zig` (`isTestPath`).
+- [ ] `depth` y `modularity` cuentan los archivos de test como nodos y sus aristas como dependencias, pero `dead_code` ya los excluye de la producción. Hoy `main_test.zig` aparece en `depth_path` y eso sube `max_depth` de 7 a 8 solo por existir.
+- [ ] Decidir una sola política: o los tests no entran en el grafo estructural (y se documenta), o entran y se acepta que un árbol con muchos tests tiene un depth artificialmente alto.
+- [ ] Si se eligen, el cambio es en `filterSourcePaths`/`computeHealth` y debe ir acompañado de una nota en el README, porque cambia los números de todos los usuarios.

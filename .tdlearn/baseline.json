@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "quality_signal": 0.7118387566939854,
+  "quality_signal": 0.7111360496872146,
   "cycle_count": 0,
-  "max_depth": 7,
-  "total_functions": 356,
+  "max_depth": 8,
+  "total_functions": 395,
   "dead_functions": 0,
   "duplicate_functions": 5
 }

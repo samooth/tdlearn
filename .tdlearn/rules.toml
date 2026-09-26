@@ -22,22 +22,26 @@ min_modularity = 0.5
 # from being absorbed by an unrelated quality gain.
 max_cycles = 0
 
-# DOCUMENTED EXCEPTION — the ceiling is 1400, not the 400 shown in the README
-# example. The largest file is src/core/rules.zig at 1308 lines: 920 of
-# implementation (parse, validate, glob-match, check) plus 388 lines of
-# table-driven tests for those exact semantics, which cannot move into a
-# separate test file without also being split from the code under test.
-# The rules schema has no per-file override, so one global ceiling is the only
-# lever available, and 1400 is the narrowest value that still admits that file.
+# Size ceilings. The largest implementation file is src/main.zig at 1152
+# lines, so 1200 is the narrowest round value that admits it, and the previous
+# documented exception (1400, needed while rules.zig still carried its own
+# 388 lines of tests) is gone: those tests now live in rules_test.zig and
+# main_test.zig, so every file under src/ is implementation plus its own
+# separate test file.
 #
-# 1400 is a ceiling, not a target and not permission to grow. Two things keep
-# it honest: the next file to cross it fails `tdlearn check .` in CI, and
-# lowering the value below 1400 fails until rules.zig is split. The split
-# (e.g. rules_parse.zig / rules_glob.zig / rules_check.zig) is tracked as
-# QA-002 in TODO.md; it is a source refactor and is deliberately not faked
-# here with a threshold bump.
-max_file_lines = 1400
+# These are ceilings, not targets. The next file to cross one fails
+# `tdlearn check .` in CI, and lowering a value fails until the file is split.
+max_file_lines = 1200
 max_fn_lines = 80
+
+# Per-function complexity ceilings. Unlike max_fn_lines, these report every
+# offending function by name, file and line, so `check` is a work list and not
+# a number to look up. 20 cyclomatic is the classic practical ceiling; 45
+# cognitive is just under this tree's previous worst case. The equality root
+# cause is a Gini over function complexity, so holding this tail down is what
+# moves the quality signal.
+max_cyclomatic = 20
+max_cognitive = 45
 
 [[layers]]
 name = "core"
@@ -56,7 +60,9 @@ order = 2
 
 [[layers]]
 name = "cli"
-paths = ["src/main.zig"]
+# The CLI's own test file is part of the same layer: leaving it out would let
+# it import anything without the layer rules noticing.
+paths = ["src/main.zig", "src/main_test.zig"]
 order = 0
 
 [[boundaries]]

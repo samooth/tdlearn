@@ -275,19 +275,25 @@ pub const FunctionExtractor = struct {
     }
 
     // C/C++: [static] type name( — heuristic: word( at end, not keywords, ends with {
+    /// Line prefixes that never introduce a C/C++ function definition. A
+    /// table rather than a chain of `startsWith` calls: the list is data, and
+    /// a new exclusion is one row.
+    const c_non_function_prefixes = [_][]const u8{
+        "#", // preprocessor
+        "typedef", "using", // type aliases, not functions
+        "class ", "struct ", "enum ", // type declarations
+        "return ", "if", "for", "while", "switch", // statements
+    };
+
+    fn isCNonFunctionLine(line: []const u8) bool {
+        for (c_non_function_prefixes) |prefix| {
+            if (std.mem.startsWith(u8, line, prefix)) return true;
+        }
+        return false;
+    }
+
     fn detectCFn(line: []const u8) ?Decl {
-        // Skip preprocessor and common non-function lines
-        if (std.mem.startsWith(u8, line, "#")) return null;
-        if (std.mem.startsWith(u8, line, "typedef ")) return null;
-        if (std.mem.startsWith(u8, line, "using ")) return null;
-        if (std.mem.startsWith(u8, line, "class ")) return null;
-        if (std.mem.startsWith(u8, line, "struct ")) return null;
-        if (std.mem.startsWith(u8, line, "enum ")) return null;
-        if (std.mem.startsWith(u8, line, "return ")) return null;
-        if (std.mem.startsWith(u8, line, "if")) return null;
-        if (std.mem.startsWith(u8, line, "for")) return null;
-        if (std.mem.startsWith(u8, line, "while")) return null;
-        if (std.mem.startsWith(u8, line, "switch")) return null;
+        if (isCNonFunctionLine(line)) return null;
 
         // Find "name(" where name is an identifier at a word boundary,
         // and the line ends with `{` or the paren group closes then `{`
@@ -444,46 +450,70 @@ pub const FunctionExtractor = struct {
         return if (depth < 0) 0 else @intCast(depth);
     }
 
+    /// Number of parameters in the declaration starting at `start_line`.
+    /// Nested groups, generics and default values are skipped, and a receiver
+    /// (`self`, `this`, with `&`/`mut` decoration) is not counted.
     fn countParameters(contents: []const u8, start_line: u32) u32 {
-        var line_no: u32 = 0;
+        const line = lineAt(contents, start_line) orelse return 0;
+        const open = std.mem.indexOfScalar(u8, line, '(') orelse return 0;
+        const end = matchingParen(line, open) orelse return 0;
+        if (end <= open + 1) return 0;
+
+        var count: u32 = 0;
+        var part_start = open + 1;
+        var index = open + 1;
+        var depth: u32 = 0;
+        while (index <= end) : (index += 1) {
+            if (index != end and !isParamBoundary(line[index], depth)) {
+                if (isGroupOpen(line[index])) {
+                    depth += 1;
+                } else if (isGroupClose(line[index]) and depth > 0) {
+                    depth -= 1;
+                }
+                continue;
+            }
+            const part = std.mem.trim(u8, line[part_start..index], " \t");
+            if (part.len > 0 and !isSelfParameter(part)) count += 1;
+            part_start = index + 1;
+        }
+        return count;
+    }
+
+    fn isParamBoundary(character: u8, depth: u32) bool {
+        return character == ',' and depth == 0;
+    }
+
+    fn isGroupOpen(character: u8) bool {
+        return character == '(' or character == '[' or character == '{';
+    }
+
+    fn isGroupClose(character: u8) bool {
+        return character == ')' or character == ']' or character == '}';
+    }
+
+    /// The 1-based `line_no`-th line of `contents`, or null when the file has
+    /// fewer lines.
+    fn lineAt(contents: []const u8, line_no: u32) ?[]const u8 {
+        var current: u32 = 0;
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |line| {
-            line_no += 1;
-            if (line_no != start_line) continue;
-            const open = std.mem.indexOfScalar(u8, line, '(') orelse return 0;
-            var depth: u32 = 0;
-            var close: ?usize = null;
-            var index = open;
-            while (index < line.len) : (index += 1) {
-                if (line[index] == '(') depth += 1;
-                if (line[index] == ')') {
-                    depth -= 1;
-                    if (depth == 0) {
-                        close = index;
-                        break;
-                    }
-                }
-            }
-            const end = close orelse return 0;
-            if (end <= open + 1) return 0;
-            var count: u32 = 0;
-            var part_start = open + 1;
-            index = open + 1;
-            depth = 0;
-            while (index <= end) : (index += 1) {
-                if (index == end or (line[index] == ',' and depth == 0)) {
-                    const part = std.mem.trim(u8, line[part_start..index], " \t");
-                    if (part.len > 0 and !isSelfParameter(part)) count += 1;
-                    part_start = index + 1;
-                } else if (line[index] == '(' or line[index] == '[' or line[index] == '{') {
-                    depth += 1;
-                } else if (line[index] == ')' or line[index] == ']' or line[index] == '}') {
-                    if (depth > 0) depth -= 1;
-                }
-            }
-            return count;
+            current += 1;
+            if (current == line_no) return line;
         }
-        return 0;
+        return null;
+    }
+
+    /// Index of the `)` that closes the `(` at `open`, or null when unbalanced.
+    fn matchingParen(line: []const u8, open: usize) ?usize {
+        var depth: u32 = 0;
+        var index = open;
+        while (index < line.len) : (index += 1) {
+            if (line[index] == '(') depth += 1;
+            if (line[index] != ')') continue;
+            depth -= 1;
+            if (depth == 0) return index;
+        }
+        return null;
     }
 
     fn isSelfParameter(part: []const u8) bool {
